@@ -1,0 +1,72 @@
+# image-prompt-hub 说明（llms.txt）
+
+> AstrBot 图片生成插件（gemini image generation）配套的在线提示词模板服务。
+> 公开接口不需要密钥；上传、修改、删除需要 API 密钥。基础地址：{BASE_URL}
+
+## 模板字段
+
+- id：12 位服务端随机串；name：1-40 字；ai_description：≤80 字单行；content：1-8000 字。
+- content 只允许 {{input}}、{{rows}}、{{cols}} 三种占位符，其他 {{...}} 一律拒绝。
+- defaults：{"resolution": "2K", "aspect_ratio": "16:9"}（可选，值须匹配对应格式）。
+- reference：none / optional / required，缺省 none；tags：最多 10 个，每个 1-20 字。
+- 不接受 nsfw 内容与图片字段。
+
+## 公开接口（不需要密钥）
+
+- GET {BASE_URL}/v1/templates?q=&tag=&cursor=&limit=
+  检索与列表。带 q 走 BM25 中文检索（名称、标签、说明、正文加权 3/2/1.5/1），
+  结果附 snippet（正文命中片段，≤120 字）；不带 q 按 updated_at 倒序。
+  limit 默认 20、最大 50；cursor 为不透明翻页游标；检索翻页上限 500 条。
+- GET {BASE_URL}/v1/templates/{id}：模板详情，带 ETag，可用 If-None-Match 取 304。
+- GET {BASE_URL}/v1/templates/batch?ids=a,b,c：批量取详情，最多 50 个。
+- GET {BASE_URL}/v1/tags?q=&limit=：标签与模板数。
+- GET {BASE_URL}/v1/status：版本、模板数、目录哈希、限流说明。
+- GET {BASE_URL}/v1/catalog/version：目录快照 {hash, count, updated_at, size}。
+- GET {BASE_URL}/v1/catalog：全部已公开模板的 JSON 包（gzip 压缩），ETag 为目录哈希，
+  Cache-Control: public, max-age=300。插件同步时先取 version，哈希不变就不必下载。
+- POST {BASE_URL}/v1/templates/{id}/report：举报 {"reason": "..."}，返回 202。
+- GET {BASE_URL}/openapi.json：完整 OpenAPI 3.1 文档。
+
+## 需要密钥的接口（Authorization: Bearer <key>）
+
+- GET {BASE_URL}/v1/key：密钥状态与权限（测试连接用）。
+- DELETE {BASE_URL}/v1/key：吊销当前密钥。
+- POST {BASE_URL}/v1/templates：上传模板，直接公开，返回 201。
+- POST {BASE_URL}/v1/templates/import：批量导入 JSON 包，最多 50 条，逐条返回结果。
+- PUT {BASE_URL}/v1/templates/{id}：修改自己的模板；可带 If-Match（版本 ETag），不匹配返回 409。
+- DELETE {BASE_URL}/v1/templates/{id}：删除自己的模板（标记删除）。
+- GET {BASE_URL}/v1/me/templates：自己上传的模板（含已隐藏）。
+- 账号额度：每小时最多新建 100 条模板（默认值，导入逐条计入），账号未删除模板总数上限 1000 条；
+  超出分别返回 429 与 403。归属按邮箱身份判断，重置密钥不影响自己已有的模板。
+- /v1/admin/*：管理接口（举报列表、模板下架与恢复、按邮箱查密钥 POST /v1/admin/keys/lookup、
+  吊销密钥、封禁与解封账号 POST /v1/admin/accounts/ban、/v1/admin/accounts/unban），需要 admin 权限。
+
+## JSON 包格式（导入、目录快照共用）
+
+{"format": "gemini-image-templates", "version": 1, "updated_at": "...", "templates": [完整模板对象]}
+
+## 申请密钥
+
+1. POST {BASE_URL}/v1/keys/request，请求体 {"email": "user@qq.com"}。
+   邮箱后缀须在白名单（qq.com、foxmail.com、163.com、gmail.com、*.edu.cn）。
+2. 收到验证邮件后在浏览器打开链接，在确认页上点“确认”（仅打开链接不生效）。
+3. 密钥发送到邮箱。一个邮箱只有一把有效密钥；重置会作废旧密钥。
+
+## 限流（超出返回 429 与 Retry-After）
+
+匿名读 60 次/分钟/IP；带密钥读 600 次/分钟（GET /v1/key 也计入）；写 60 次/分钟/密钥；
+申请密钥 5 次/小时/IP（另有按邮箱的冷却与每日上限）；验证 20 次/小时/IP；举报 10 次/小时/IP；
+带 Bearer 的请求另有 120 次/分钟/IP 的认证尝试限额，无效密钥也消耗额度（IPv6 按 /64 网段计）。
+
+## 缓存
+
+公开读接口的成功响应带 Cache-Control: public, max-age=60（/v1/catalog 为 300）；
+错误响应、写操作和带 Authorization 头的请求一律不缓存（no-store / private, no-store）。
+
+## 调用示例
+
+curl {BASE_URL}/v1/templates?q=赛博朋克&limit=10
+curl {BASE_URL}/v1/templates/abcdefghijk23 -H 'If-None-Match: "abcdefghijk23-v1"'
+curl -X POST {BASE_URL}/v1/templates -H 'Authorization: Bearer iph_xxx' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"赛博朋克城市","content":"赛博朋克风格的城市，霓虹灯与雨夜 {{input}}","tags":["科幻"]}'
