@@ -95,6 +95,116 @@ image-prompt-hub admin unban --email <邮箱>
 
 IPv6 客户端按 /64 网段作为限流键与 IP 哈希的输入（IPv4 按完整地址，IPv4 映射地址按其 IPv4 计），避免在一个网段内轮换地址绕过限流。限流状态在进程内存里，后台每 5 分钟清理已恢复满额度的键。
 
+## 部署
+
+以下步骤以 `hub.example.com` 为例；样例文件在仓库 `deploy/` 目录：`image-prompt-hub.service`（systemd 单元）与 `iph-admin`（管理命令包装脚本）。
+
+### 目录布局与系统用户
+
+二进制放在 `/opt/image-prompt-hub/releases/<版本>/` 下，`current` 软链指向当前版本，systemd 固定执行 `/opt/image-prompt-hub/current/image-prompt-hub serve`：
+
+```bash
+useradd --system --user-group --no-create-home --home-dir /nonexistent \
+  --shell /usr/sbin/nologin image-prompt-hub
+install -d -m 0755 /opt/image-prompt-hub/releases
+install -d -m 0750 /etc/image-prompt-hub
+```
+
+### 数据库
+
+建角色与库，口令只经标准输入交给 psql，不进命令行参数与日志（先在变量里生成，再经 heredoc 传入，输出过滤一遍防回显）。PostgreSQL 不在容器里时，把下面命令里的 `docker exec -i <postgres 容器名>` 换成 `sudo -u postgres`：
+
+```bash
+DB_PASSWORD=$(openssl rand -hex 24)
+docker exec -i <postgres 容器名> psql -U <超级用户> -d postgres -v ON_ERROR_STOP=1 -q <<SQL 2>&1 | sed "s/$DB_PASSWORD/<redacted>/g"
+CREATE ROLE image_prompt_hub LOGIN PASSWORD '$DB_PASSWORD';
+CREATE DATABASE image_prompt_hub OWNER image_prompt_hub;
+REVOKE CONNECT ON DATABASE image_prompt_hub FROM PUBLIC;
+SQL
+```
+
+### 环境文件
+
+`/etc/image-prompt-hub/env`，权限 600。先建出 600 的空文件再写入，内容落盘时就不会有任何人可读的窗口。四个密钥用随机值生成（示例命令，不要用文档里的值）：
+
+```bash
+install -m 600 /dev/null /etc/image-prompt-hub/env
+cat >> /etc/image-prompt-hub/env <<EOF
+BIND_ADDR=127.0.0.1:8787
+DATA_DIR=/var/lib/image-prompt-hub
+PUBLIC_BASE_URL=https://hub.example.com
+TRUST_CF_CONNECTING_IP=true
+LOG_FORMAT=json
+DATABASE_URL=postgres://image_prompt_hub:$DB_PASSWORD@127.0.0.1:5432/image_prompt_hub
+KEY_PEPPER=$(openssl rand -base64 48)
+EMAIL_HASH_SECRET=$(openssl rand -base64 48)
+IP_HASH_SECRET=$(openssl rand -base64 48)
+EMAIL_ENC_KEY=$(openssl rand -base64 32)
+EOF
+chmod 600 /etc/image-prompt-hub/env
+```
+
+值里含空格或 `#`、`"` 等特殊字符时，用引号包住整个值，具体规则见 `man systemd.exec` 的 EnvironmentFile 一节。完整变量列表见上文的配置表，发信相关先留 `EMAIL_PROVIDER=disabled`，域名与邮箱确定后再补。
+
+### 安装与启停
+
+```bash
+install -m 644 deploy/image-prompt-hub.service /etc/systemd/system/
+install -m 755 deploy/iph-admin /usr/local/sbin/
+systemctl daemon-reload
+systemctl enable --now image-prompt-hub
+journalctl -u image-prompt-hub -f        # 看日志
+systemctl restart image-prompt-hub       # 重启（等待后台发信任务收尾，最多 10 秒）
+```
+
+配置错误（缺必填项、密钥不合法等）时进程以退出码 2 结束，单元设置了 `RestartPreventExitStatus=2`，不会反复重启；按日志提示修正环境文件后手动 `systemctl start`。
+
+### 对接 Cloudflare Tunnel
+
+- 服务保持只监听回环（`BIND_ADDR=127.0.0.1:8787`），Cloudflare Tunnel 的源站地址填 `http://localhost:8787`。
+- 保持 `TRUST_CF_CONNECTING_IP=true`：客户端 IP 取自 Cloudflare 注入的 `CF-Connecting-IP` 头，限流与封禁按真实访客 IP 计。不要把端口直接暴露到公网，否则该头可被伪造。
+
+### Cloudflare 缓存规则建议
+
+- 只缓存 `/v1/catalog` 这一个路径；缓存资格（Cache eligibility）选 Eligible for cache；Edge TTL 选 Use cache-control header if present, bypass cache if not；缓存键保持默认；需要时开启 Respect Strong ETags。
+- `/v1/catalog` 按 `Accept-Encoding` 协商返回 gzip（强 ETag）或明文（弱 ETag），响应带 `Vary: Accept-Encoding`。客户端同步时以响应里的 ETag 为准：先去掉可能出现的 `W/` 弱前缀，再比较哈希部分。
+- 没有命中缓存规则的接口 Cloudflare 默认不缓存（响应里的 `cf-cache-status` 是 `DYNAMIC`），无需额外规则。源站的缓存头策略：公开读接口的成功响应带 `Cache-Control: public, max-age=60`（`/v1/catalog` 为 300）；错误响应、写操作、密钥申请与确认流程一律 `no-store`；带 `Authorization` 的请求一律 `private, no-store`。
+
+### 升级与回滚
+
+```bash
+# 上传新版本并校验
+install -d /opt/image-prompt-hub/releases/<新版本>
+# （上传二进制到该目录）
+chmod 755 /opt/image-prompt-hub/releases/<新版本>/image-prompt-hub
+chown root:root /opt/image-prompt-hub/releases/<新版本>/image-prompt-hub
+sha256sum /opt/image-prompt-hub/releases/<新版本>/image-prompt-hub   # 与构建侧核对
+# 切换软链并重启
+ln -sfn /opt/image-prompt-hub/releases/<新版本> /opt/image-prompt-hub/current
+systemctl restart image-prompt-hub
+```
+
+回滚就是把软链指回旧版本目录再重启。数据库迁移在启动时自动执行，只增不改已应用的迁移文件。
+
+### 备份
+
+- 数据库：定期 `pg_dump`（密钥只存哈希，但模板、密钥记录与举报都在库里）。
+- 环境文件里的四个密钥（`KEY_PEPPER`、`EMAIL_HASH_SECRET`、`IP_HASH_SECRET`、`EMAIL_ENC_KEY`）必须另行备份：一旦丢失无法补发，一旦轮换，已签发的 API 密钥与账号哈希全部失效。
+
+### 管理命令
+
+```bash
+iph-admin admin create-key --email you@example.com --scopes read,write,admin   # 只在终端显示一次
+iph-admin admin ban --email someone@example.com --reason "原因" --hide-templates
+iph-admin admin revoke-key --key-id <uuid>
+```
+
+### 常见问题
+
+- 服务起不来、状态是 failed：多半是配置错误（退出码 2），`journalctl -u image-prompt-hub -n 50` 看具体缺哪个变量。
+- 端口被占用：`BIND_ADDR` 指定的地址监听失败时日志里报「监听端口失败」，换端口或找到占用进程。
+- SMTP 密码含特殊字符：在环境文件里用引号包住整个值（规则见 `man systemd.exec` 的 EnvironmentFile 一节）；不要用 shell 脚本 `source` 环境文件，`& $ ;` 会被 shell 误解析——`deploy/iph-admin` 用 `systemd-run -p EnvironmentFile=` 正是为了避免这一点。
+
 ## 邮件预览
 
 `cargo run --example preview` 把申请、重置、密钥三种邮件的 HTML 与纯文本写到 `target/preview/emails/`，浏览器打开 `.html` 查看效果。

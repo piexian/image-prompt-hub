@@ -1,0 +1,15 @@
+#!/bin/sh
+# 以服务账号和服务相同的环境运行 image-prompt-hub 管理子命令，例如：
+#   iph-admin admin create-key --email you@example.com --scopes read,write,admin
+#   iph-admin admin ban --email someone@example.com --reason "垃圾模板" --hide-templates
+# 安装到 /usr/local/sbin/iph-admin 并 chmod 755。
+#
+# 环境文件交给 systemd（EnvironmentFile=）解析，与服务的读取方式一致；
+# 不要改成 shell 的 source：source 会按 shell 规则展开文本，数据库密码或
+# 密钥里出现 & $ ; 等字符时会被误解析甚至执行。
+exec systemd-run --quiet --pipe --wait --collect \
+  -p User=image-prompt-hub -p Group=image-prompt-hub \
+  -p EnvironmentFile=/etc/image-prompt-hub/env \
+  -p StateDirectory=image-prompt-hub -p StateDirectoryMode=0750 -p WorkingDirectory=/var/lib/image-prompt-hub \
+  -p UMask=0077 \
+  /opt/image-prompt-hub/current/image-prompt-hub "$@"

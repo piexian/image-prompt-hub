@@ -1,0 +1,51 @@
+# image-prompt-hub 的 systemd 单元样例。
+# 安装到 /etc/systemd/system/image-prompt-hub.service 后 systemctl daemon-reload。
+# 运行环境（数据库连接串与四个密钥）放在 /etc/image-prompt-hub/env，
+# 由 systemd 以 root 读取后交给服务账号，服务本身读不到该文件。
+[Unit]
+Description=image-prompt-hub 在线提示词模板服务
+# PostgreSQL 以容器方式运行时依赖 docker.service；本机直装的 PostgreSQL 可按需调整
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=image-prompt-hub
+Group=image-prompt-hub
+EnvironmentFile=/etc/image-prompt-hub/env
+StateDirectory=image-prompt-hub
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/image-prompt-hub
+ExecStart=/opt/image-prompt-hub/current/image-prompt-hub serve
+Restart=on-failure
+RestartSec=10
+# 退出码 2 是配置错误（缺必填项、密钥不合法等），重启也不会好，直接停在 failed 里排查
+RestartPreventExitStatus=2
+TimeoutStopSec=30
+MemoryMax=1G
+TasksMax=256
+
+# 沙箱化：服务只需要监听回环端口、读写自己的状态目录和连接数据库
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
