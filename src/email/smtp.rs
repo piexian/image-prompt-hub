@@ -4,7 +4,6 @@
 //! 这一点与插件市场不同，需要明文的场景必须显式配置 `none`。
 
 use async_trait::async_trait;
-use lettre::message::header::ContentType;
 use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{Tls, TlsParameters, TlsParametersBuilder};
@@ -132,17 +131,29 @@ fn build_mailbox(from: &str, from_name: &str) -> Result<Mailbox, String> {
     }
 }
 
+/// 构造 multipart/alternative 邮件（纯文本 + HTML），可单测。
+pub fn build_message(
+    from: &Mailbox,
+    to: &str,
+    subject: &str,
+    text: &str,
+    html: &str,
+) -> Result<Message, String> {
+    let to_mailbox = to.parse().map_err(|_| "收件地址无效".to_string())?;
+    let multipart =
+        lettre::message::MultiPart::alternative_plain_html(text.to_string(), html.to_string());
+    Message::builder()
+        .from(from.clone())
+        .to(to_mailbox)
+        .subject(subject)
+        .multipart(multipart)
+        .map_err(|e| format!("构造邮件失败：{e}"))
+}
+
 #[async_trait]
 impl Mailer for SmtpMailer {
-    async fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), String> {
-        let to_mailbox = to.parse().map_err(|_| "收件地址无效".to_string())?;
-        let message = Message::builder()
-            .from(self.from.clone())
-            .to(to_mailbox)
-            .subject(subject)
-            .header(ContentType::TEXT_PLAIN)
-            .body(body.to_string())
-            .map_err(|e| format!("构造邮件失败：{e}"))?;
+    async fn send(&self, to: &str, subject: &str, text: &str, html: &str) -> Result<(), String> {
+        let message = build_message(&self.from, to, subject, text, html)?;
         let result = tokio::time::timeout(SEND_TIMEOUT, self.transport.send(message)).await;
         match result {
             Ok(Ok(_)) => Ok(()),

@@ -12,10 +12,11 @@ use crate::accounts;
 use crate::api::helpers::{map_json_rejection, RequestContext};
 use crate::crypto;
 use crate::email::{
-    api_key_email_body, check_email_daily_limit, increment_email_daily_count, redact_emails,
-    verification_email_body, API_KEY_SUBJECT, VERIFICATION_SUBJECT,
+    check_email_daily_limit, increment_email_daily_count, redact_emails, templates,
+    API_KEY_SUBJECT, VERIFICATION_SUBJECT,
 };
 use crate::error::ApiError;
+use crate::html::escape_html;
 use crate::models::ApiKeyRow;
 use crate::state::AppState;
 use crate::validate::{is_email_allowed, is_valid_email_format, normalize_email};
@@ -45,13 +46,6 @@ fn html_response(body: String, status: StatusCode) -> Response {
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
-}
-
-fn escape_html(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 fn page_shell(title: &str, body: &str) -> String {
@@ -277,13 +271,10 @@ async fn confirm_verification(state: AppState, token: String) -> Result<Response
         state.config.public_base_url,
         state.config.revoke_token(key_id)
     );
+    let key_mail = templates::api_key_email(&new_key, &revoke_link);
     if let Err(error) = state
         .mailer
-        .send(
-            &email,
-            API_KEY_SUBJECT,
-            &api_key_email_body(&new_key, &revoke_link),
-        )
+        .send(&email, API_KEY_SUBJECT, &key_mail.text, &key_mail.html)
         .await
     {
         tracing::error!(error = %redact_emails(&error), purpose = %purpose, "密钥邮件发送失败");
@@ -623,12 +614,14 @@ pub async fn request_key(
             "{}/v1/keys/verify?token={}",
             state.config.public_base_url, token
         );
+        let verification_mail = templates::verification_email(purpose, &link);
         let send_result = state
             .mailer
             .send(
                 &email,
                 VERIFICATION_SUBJECT,
-                &verification_email_body(purpose, &link),
+                &verification_mail.text,
+                &verification_mail.html,
             )
             .await;
         match send_result {

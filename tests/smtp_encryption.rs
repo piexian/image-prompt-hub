@@ -106,7 +106,7 @@ async fn starttls_and_auto_negotiate_starttls_in_plaintext_first() {
     for encryption in [SmtpEncryption::StartTls, SmtpEncryption::Auto] {
         let (port, log) = spawn_server(Script::OfferStartTls).await;
         let result = mailer(port, encryption, true)
-            .send("user@qq.com", "主题", "正文")
+            .send("user@qq.com", "主题", "正文", "<p>正文</p>")
             .await;
         // 假服务器在 220 之后断开，TLS 升级必然失败；这里只关心握手顺序
         assert!(result.is_err(), "{encryption:?}：升级失败时发送应报错");
@@ -136,7 +136,7 @@ async fn missing_starttls_is_refused_without_leaking_credentials() {
     for encryption in [SmtpEncryption::Auto, SmtpEncryption::StartTls] {
         let (port, log) = spawn_server(Script::NoStartTls).await;
         let result = mailer(port, encryption, true)
-            .send("user@qq.com", "主题", "含有秘密的正文")
+            .send("user@qq.com", "主题", "含有秘密的正文", "<p>正文</p>")
             .await;
         assert!(
             result.is_err(),
@@ -163,7 +163,7 @@ async fn missing_starttls_is_refused_without_leaking_credentials() {
 async fn explicit_none_delivers_in_plaintext() {
     let (port, log) = spawn_server(Script::NoStartTls).await;
     let result = mailer(port, SmtpEncryption::None, false)
-        .send("user@qq.com", "主题", "正文")
+        .send("user@qq.com", "主题", "正文", "<p>正文</p>")
         .await;
     assert!(result.is_ok(), "none 应能明文投递：{result:?}");
     let seen = commands(&log);

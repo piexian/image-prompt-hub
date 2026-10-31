@@ -8,6 +8,7 @@ pub mod config;
 pub mod crypto;
 pub mod email;
 pub mod error;
+pub mod html;
 pub mod models;
 pub mod ratelimit;
 pub mod search;

@@ -94,6 +94,10 @@ image-prompt-hub admin unban --email <邮箱>
 
 IPv6 客户端按 /64 网段作为限流键与 IP 哈希的输入（IPv4 按完整地址，IPv4 映射地址按其 IPv4 计），避免在一个网段内轮换地址绕过限流。限流状态在进程内存里，后台每 5 分钟清理已恢复满额度的键。
 
+## 邮件预览
+
+`cargo run --example preview` 把申请、重置、密钥三种邮件的 HTML 与纯文本写到 `target/preview/emails/`，浏览器打开 `.html` 查看效果。
+
 ## 测试
 
 ```bash

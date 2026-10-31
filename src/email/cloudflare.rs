@@ -58,8 +58,14 @@ impl CloudflareMailer {
         )
     }
 
-    /// 与插件市场一致的请求体。
-    pub fn request_body(&self, to: &str, subject: &str, text: &str) -> serde_json::Value {
+    /// 与插件市场一致的请求体；html 由调用方传入，不再从纯文本转义生成。
+    pub fn request_body(
+        &self,
+        to: &str,
+        subject: &str,
+        text: &str,
+        html: &str,
+    ) -> serde_json::Value {
         json!({
             "to": to,
             "from": {
@@ -68,7 +74,7 @@ impl CloudflareMailer {
             },
             "subject": truncate_chars(subject, 998),
             "text": text,
-            "html": html_escape(text),
+            "html": html,
         })
     }
 }
@@ -94,23 +100,6 @@ fn sender_name(name: &str) -> String {
     } else {
         trimmed.to_string()
     }
-}
-
-/// 正文转义后把换行换成 <br>，与插件市场一致。
-pub fn html_escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            '\n' => out.push_str("<br>"),
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -181,7 +170,7 @@ fn classify_response(status: reqwest::StatusCode, body: &[u8]) -> Result<(), Str
 
 #[async_trait]
 impl Mailer for CloudflareMailer {
-    async fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), String> {
+    async fn send(&self, to: &str, subject: &str, text: &str, html: &str) -> Result<(), String> {
         if self.account_id.is_empty() {
             return Err("Cloudflare account ID 未配置".to_string());
         }
@@ -195,7 +184,7 @@ impl Mailer for CloudflareMailer {
             .client
             .post(self.endpoint())
             .bearer_auth(&self.api_token)
-            .json(&self.request_body(to, subject, body))
+            .json(&self.request_body(to, subject, text, html))
             .send()
             .await
             .map_err(|e| format!("Cloudflare 请求失败：{e}"))?;
@@ -221,13 +210,14 @@ mod tests {
             "noreply@example.com",
             "模板服务",
         );
-        let body = mailer.request_body("to@example.com", "主题", "第一行\n第二行<>");
+        let body = mailer.request_body("to@example.com", "主题", "纯文本", "<p>HTML 正文</p>");
         assert_eq!(body["to"], "to@example.com");
         assert_eq!(body["from"]["email"], "noreply@example.com");
         assert_eq!(body["from"]["name"], "模板服务");
         assert_eq!(body["subject"], "主题");
-        assert_eq!(body["text"], "第一行\n第二行<>");
-        assert_eq!(body["html"], "第一行<br>第二行&lt;&gt;");
+        assert_eq!(body["text"], "纯文本");
+        // html 由调用方传入，原样发送
+        assert_eq!(body["html"], "<p>HTML 正文</p>");
         assert!(mailer
             .endpoint()
             .ends_with("/accounts/acc%20id%2B1/email/sending/send"));
@@ -235,7 +225,7 @@ mod tests {
         let default_name =
             CloudflareMailer::with_endpoint_base("http://x", "a", "t", "f@x.com", "  ");
         assert_eq!(
-            default_name.request_body("t@x.com", "s", "b")["from"]["name"],
+            default_name.request_body("t@x.com", "s", "b", "h")["from"]["name"],
             "image-prompt-hub"
         );
     }
@@ -244,7 +234,7 @@ mod tests {
     fn subject_truncated_to_998_chars() {
         let mailer = CloudflareMailer::with_endpoint_base("http://x", "a", "t", "f@x.com", "n");
         let long_subject = "字".repeat(1200);
-        let body = mailer.request_body("t@x.com", &long_subject, "b");
+        let body = mailer.request_body("t@x.com", &long_subject, "b", "h");
         assert_eq!(body["subject"].as_str().unwrap().chars().count(), 998);
     }
 
@@ -281,13 +271,5 @@ mod tests {
         assert!(classify_response(reqwest::StatusCode::OK, b"not json")
             .unwrap_err()
             .contains("HTTP 200"));
-    }
-
-    #[test]
-    fn html_escaping() {
-        assert_eq!(
-            html_escape("a&b<c>\"d\"'e\nf"),
-            "a&amp;b&lt;c&gt;&quot;d&quot;&#x27;e<br>f"
-        );
     }
 }

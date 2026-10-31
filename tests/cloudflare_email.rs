@@ -68,7 +68,12 @@ async fn success_sends_expected_payload() {
     .await;
     let mailer = mailer(&base);
     mailer
-        .send("user@qq.com", "主题", "第一行\n第二行")
+        .send(
+            "user@qq.com",
+            "主题",
+            "第一行\n第二行",
+            "<p>第一行<br>第二行</p>",
+        )
         .await
         .unwrap();
     assert_eq!(api.calls.load(Ordering::SeqCst), 1);
@@ -78,7 +83,8 @@ async fn success_sends_expected_payload() {
     assert_eq!(request["from"]["name"], "模板服务");
     assert_eq!(request["subject"], "主题");
     assert_eq!(request["text"], "第一行\n第二行");
-    assert_eq!(request["html"], "第一行<br>第二行");
+    // html 由调用方传入，原样发送
+    assert_eq!(request["html"], "<p>第一行<br>第二行</p>");
 }
 
 #[tokio::test]
@@ -101,7 +107,7 @@ async fn error_cases_are_failures() {
     for (status, body, expect) in cases {
         let (base, _) = spawn_fake(status, body).await;
         let error = mailer(&base)
-            .send("user@qq.com", "s", "b")
+            .send("user@qq.com", "s", "b", "<p>b</p>")
             .await
             .unwrap_err();
         assert!(error.contains(expect), "错误信息不符：{error}");

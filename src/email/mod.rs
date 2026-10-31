@@ -2,6 +2,7 @@
 
 pub mod cloudflare;
 pub mod smtp;
+pub mod templates;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -11,17 +12,19 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::config::EmailProvider;
 use crate::error::ApiError;
 
-/// 封装一封已发出的邮件，供测试断言。
+/// 封装一封已发出的邮件，供测试断言。`body` 是纯文本部分，`html` 是 HTML 部分。
 #[derive(Debug, Clone)]
 pub struct SentMail {
     pub to: String,
     pub subject: String,
     pub body: String,
+    pub html: String,
 }
 
 #[async_trait]
 pub trait Mailer: Send + Sync {
-    async fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), String>;
+    /// `text` 是纯文本回退，`html` 是 HTML 正文，客户端按能力选择显示哪个。
+    async fn send(&self, to: &str, subject: &str, text: &str, html: &str) -> Result<(), String>;
 }
 
 /// 未配置发信时的占位实现，调用即失败。
@@ -29,7 +32,13 @@ pub struct DisabledMailer;
 
 #[async_trait]
 impl Mailer for DisabledMailer {
-    async fn send(&self, _to: &str, _subject: &str, _body: &str) -> Result<(), String> {
+    async fn send(
+        &self,
+        _to: &str,
+        _subject: &str,
+        _text: &str,
+        _html: &str,
+    ) -> Result<(), String> {
         Err("邮件服务未启用".to_string())
     }
 }
@@ -66,14 +75,15 @@ impl Default for FakeMailer {
 
 #[async_trait]
 impl Mailer for FakeMailer {
-    async fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), String> {
+    async fn send(&self, to: &str, subject: &str, text: &str, html: &str) -> Result<(), String> {
         if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
             return Err("测试模拟的发送失败".to_string());
         }
         self.sent.lock().await.push(SentMail {
             to: to.to_string(),
             subject: subject.to_string(),
-            body: body.to_string(),
+            body: text.to_string(),
+            html: html.to_string(),
         });
         Ok(())
     }
@@ -191,34 +201,6 @@ fn seconds_until_tomorrow() -> u64 {
 pub const VERIFICATION_SUBJECT: &str = "验证你的邮箱 - image-prompt-hub 密钥申请";
 pub const API_KEY_SUBJECT: &str = "你的 image-prompt-hub API 密钥";
 
-/// 验证邮件正文。purpose 决定措辞是申请还是重置。
-pub fn verification_email_body(purpose: &str, link: &str) -> String {
-    let action = if purpose == "reset" {
-        "重置 API 密钥。确认后将生成新密钥，并立即作废你当前有效的密钥。"
-    } else {
-        "申请 API 密钥。确认后新密钥将发送到这个邮箱。"
-    };
-    format!(
-        "你（或他人）正在为这个邮箱{action}\n\n\
-         请在 30 分钟内打开下面的链接并点击“确认”按钮完成操作：\n\
-         {link}\n\n\
-         打开链接本身不会生效，必须在页面上点击“确认”。\n\
-         如果不是你本人的操作，忽略这封邮件即可，不会有任何影响。\n"
-    )
-}
-
-/// 密钥邮件正文。吊销走邮件里的链接确认页，不再引导用户调接口。
-pub fn api_key_email_body(key: &str, revoke_link: &str) -> String {
-    format!(
-        "你的 API 密钥如下，只显示这一次，请妥善保存：\n\n\
-         {key}\n\n\
-         在 AstrBot 图片生成插件的提示词广场“在线”页里选择“填写密钥”并粘贴上面的密钥即可使用。\n\n\
-         吊销方式：打开下面的链接，在页面上点击“确认吊销”即可（打开链接本身不会吊销）：\n\
-         {revoke_link}\n\
-         也可以用同一邮箱重新申请，重置会作废旧密钥。\n"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,10 +208,19 @@ mod tests {
     #[tokio::test]
     async fn fake_mailer_records_and_fails() {
         let mailer = FakeMailer::new();
-        mailer.send("a@b.com", "主题", "正文").await.unwrap();
-        assert_eq!(mailer.mails().await.len(), 1);
+        mailer
+            .send("a@b.com", "主题", "正文", "<p>正文</p>")
+            .await
+            .unwrap();
+        let mails = mailer.mails().await;
+        assert_eq!(mails.len(), 1);
+        assert_eq!(mails[0].body, "正文");
+        assert_eq!(mails[0].html, "<p>正文</p>");
         mailer.set_fail(true);
-        assert!(mailer.send("a@b.com", "主题", "正文").await.is_err());
+        assert!(mailer
+            .send("a@b.com", "主题", "正文", "<p>x</p>")
+            .await
+            .is_err());
         assert_eq!(mailer.mails().await.len(), 1);
     }
 
@@ -250,27 +241,5 @@ mod tests {
         assert_eq!(redact_emails("name@"), "name@");
         assert_eq!(redact_emails("@domain.com"), "@domain.com");
         assert_eq!(redact_emails(""), "");
-    }
-
-    #[test]
-    fn verification_body_wording() {
-        let reset = verification_email_body("reset", "https://x.example/v1/keys/verify?token=t");
-        assert!(reset.contains("作废"));
-        let issue = verification_email_body("issue", "https://x.example/v1/keys/verify?token=t");
-        assert!(!issue.contains("作废你当前"));
-        assert!(issue.contains("申请"));
-        assert!(issue.contains("https://x.example/v1/keys/verify?token=t"));
-    }
-
-    #[test]
-    fn api_key_body_contents() {
-        let link = "https://hub.example.com/v1/keys/revoke?token=x";
-        let body = api_key_email_body("iph_abc", link);
-        assert!(body.contains("iph_abc"));
-        assert!(body.contains(link), "正文必须包含完整吊销链接");
-        assert!(!body.contains("DELETE /v1/key"), "不再引导用户调接口");
-        assert!(body.contains("在线"));
-        assert!(body.contains("确认吊销"));
-        assert!(body.contains("重置会作废旧密钥"));
     }
 }
