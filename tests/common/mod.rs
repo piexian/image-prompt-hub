@@ -287,6 +287,27 @@ impl TestApp {
         }
     }
 
+    /// 从最新一封密钥邮件里提取吊销链接。
+    pub async fn latest_revoke_link(&self) -> String {
+        let mails = self.mailer.mails().await;
+        let mail = mails
+            .iter()
+            .rev()
+            .find(|m| m.subject.contains("API 密钥"))
+            .expect("没有收到密钥邮件");
+        let marker = "/v1/keys/revoke?token=";
+        let idx = mail.body.find(marker).expect("邮件里没有吊销链接");
+        // 链接是完整 URL：往回找到协议头，再取到下一个空白为止
+        let url_start = mail.body[..idx]
+            .rfind("https://")
+            .expect("吊销链接缺少协议头");
+        mail.body[url_start..]
+            .split_whitespace()
+            .next()
+            .expect("吊销链接为空")
+            .to_string()
+    }
+
     /// 把该邮箱最近的验证记录时间整体前移，绕过冷却窗口（代替睡眠等待）。
     pub async fn backdate_verifications(&self, email: &str) {
         let email_hmac = self.state.config.account_hmac(email);

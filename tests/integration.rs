@@ -2261,3 +2261,249 @@ async fn rate_limit_returns_429_with_retry_after() {
         .unwrap();
     assert_eq!(keyed.status(), 200);
 }
+
+/// 邮件里的吊销链接：确认页、吊销、幂等与响应头。
+#[tokio::test]
+async fn revoke_link_flow() {
+    let Some(app) = app().await else { return };
+
+    // 申请一把密钥，从邮件正文里拿到吊销链接
+    let key = app.issue_key("revoke@qq.com").await;
+    let link = app.latest_revoke_link().await;
+    assert!(
+        link.starts_with("https://hub.test.example/v1/keys/revoke?token="),
+        "链接必须以 PUBLIC_BASE_URL 开头：{link}"
+    );
+    let token = link.split("token=").nth(1).unwrap().to_string();
+
+    // GET 确认页：含密钥前缀与 POST 表单，且不改变状态
+    let page = app
+        .client
+        .get(app.url(&format!("/v1/keys/revoke?token={token}")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), 200);
+    for header in [
+        "content-security-policy",
+        "x-frame-options",
+        "cache-control",
+        "referrer-policy",
+    ] {
+        assert!(
+            page.headers().contains_key(header),
+            "吊销页缺少响应头 {header}"
+        );
+    }
+    let html = page.text().await.unwrap();
+    let prefix = &key[..key.len().min(12)];
+    assert!(
+        html.contains(prefix),
+        "确认页应写明密钥前缀 {prefix}：{html}"
+    );
+    assert!(
+        html.contains("<form method=\"post\" action=\"/v1/keys/revoke\">"),
+        "缺少 POST 表单"
+    );
+    assert!(html.contains("确认吊销"), "缺少确认吊销按钮");
+    assert!(html.contains("插件会立刻失效"), "缺少失效说明");
+    assert!(html.contains("重新申请新密钥"), "缺少重新申请说明");
+    assert_eq!(
+        app.client
+            .get(app.url("/v1/key"))
+            .bearer_auth(&key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200,
+        "GET 确认页不应改变密钥状态"
+    );
+
+    // POST 吊销生效
+    let confirm = app
+        .client
+        .post(app.url("/v1/keys/revoke"))
+        .form(&[("token", token.as_str())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirm.status(), 200);
+    assert!(confirm.text().await.unwrap().contains("密钥已吊销"));
+    assert_eq!(
+        app.client
+            .get(app.url("/v1/key"))
+            .bearer_auth(&key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401,
+        "吊销后密钥应立即失效"
+    );
+
+    // 幂等：重复 POST 与再次 GET 都显示通用无效页
+    for repeat in 0..2 {
+        let again = app
+            .client
+            .post(app.url("/v1/keys/revoke"))
+            .form(&[("token", token.as_str())])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(again.status(), 200);
+        assert!(
+            again.text().await.unwrap().contains("链接无效"),
+            "第 {repeat} 次重复提交"
+        );
+    }
+    let page = app
+        .client
+        .get(app.url(&format!("/v1/keys/revoke?token={token}")))
+        .send()
+        .await
+        .unwrap();
+    assert!(page.text().await.unwrap().contains("链接无效"));
+}
+
+/// 重置后旧吊销链接失效、新链接有效；非 active 密钥的令牌无效。
+#[tokio::test]
+async fn revoke_link_after_reset_and_non_active_keys() {
+    let Some(app) = app().await else { return };
+
+    // 第一把密钥及其链接
+    let _first = app.issue_key("rotate@qq.com").await;
+    let first_token = app
+        .latest_revoke_link()
+        .await
+        .split("token=")
+        .nth(1)
+        .unwrap()
+        .to_string();
+
+    // 同一邮箱重置拿第二把（吊销第一把）
+    app.backdate_verifications("rotate@qq.com").await;
+    let _second = app.issue_key("rotate@qq.com").await;
+    let second_token = app
+        .latest_revoke_link()
+        .await
+        .split("token=")
+        .nth(1)
+        .unwrap()
+        .to_string();
+
+    // 旧链接：密钥已非 active → 通用无效页，POST 同样无效
+    for token in [&first_token, &second_token] {
+        let page = app
+            .client
+            .get(app.url(&format!("/v1/keys/revoke?token={token}")))
+            .send()
+            .await
+            .unwrap();
+        let body = page.text().await.unwrap();
+        if token == &first_token {
+            assert!(body.contains("链接无效"), "重置后旧链接应失效");
+        } else {
+            assert!(body.contains("确认吊销"), "新链接应有效");
+        }
+    }
+    let post = app
+        .client
+        .post(app.url("/v1/keys/revoke"))
+        .form(&[("token", first_token.as_str())])
+        .send()
+        .await
+        .unwrap();
+    assert!(post.text().await.unwrap().contains("链接无效"));
+
+    // 非 active：pending_delivery 与已吊销密钥的令牌都无效
+    let email_hmac = app.state.config.account_hmac("pending@qq.com");
+    let pending_key = image_prompt_hub::crypto::generate_api_key();
+    let pending_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO api_keys (id, key_prefix, key_hash, email_hmac, scopes, status)
+         VALUES ($1, $2, $3, $4, '{read}', 'pending_delivery')",
+    )
+    .bind(pending_id)
+    .bind(image_prompt_hub::crypto::key_prefix(&pending_key))
+    .bind(app.state.config.key_hash(&pending_key))
+    .bind(&email_hmac)
+    .execute(&app.state.pool)
+    .await
+    .unwrap();
+    let revoked_key = image_prompt_hub::crypto::generate_api_key();
+    let revoked_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO api_keys (id, key_prefix, key_hash, email_hmac, scopes, status, revoked_at)
+         VALUES ($1, $2, $3, $4, '{read}', 'revoked', now())",
+    )
+    .bind(revoked_id)
+    .bind(image_prompt_hub::crypto::key_prefix(&revoked_key))
+    .bind(app.state.config.key_hash(&revoked_key))
+    .bind(&email_hmac)
+    .execute(&app.state.pool)
+    .await
+    .unwrap();
+
+    for key_id in [pending_id, revoked_id] {
+        let token = app.state.config.revoke_token(key_id);
+        let page = app
+            .client
+            .get(app.url(&format!("/v1/keys/revoke?token={token}")))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            page.text().await.unwrap().contains("链接无效"),
+            "非 active 密钥应无效"
+        );
+    }
+}
+
+/// 吊销接口受 RATE_KEY_VERIFY_PER_HOUR 限流。
+#[tokio::test]
+async fn revoke_link_rate_limited() {
+    let Some(app) = app_with(|config| {
+        config.rate_limits.key_verify_per_hour = 3;
+    })
+    .await
+    else {
+        return;
+    };
+
+    let key = app.issue_key("rate-revoke@qq.com").await;
+    let token = app
+        .latest_revoke_link()
+        .await
+        .split("token=")
+        .nth(1)
+        .unwrap()
+        .to_string();
+
+    // 限流窗口内第 4 次访问返回 429
+    let mut got_429 = false;
+    for _ in 0..4 {
+        let response = app
+            .client
+            .get(app.url(&format!("/v1/keys/revoke?token={token}")))
+            .send()
+            .await
+            .unwrap();
+        if response.status() == 429 {
+            got_429 = true;
+            break;
+        }
+    }
+    assert!(got_429, "吊销接口应受 verify 限流约束");
+    // 密钥未被吊销（限流挡下的是查看，不是吊销动作）
+    assert_eq!(
+        app.client
+            .get(app.url("/v1/key"))
+            .bearer_auth(&key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+}

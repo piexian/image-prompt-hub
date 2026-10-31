@@ -29,6 +29,8 @@ use crate::state::AppState;
         keys::request_key,
         keys::verify_page,
         keys::verify_confirm,
+        keys::revoke_page,
+        keys::revoke_confirm,
         keys::key_info,
         keys::revoke_own_key,
         write::create_template,

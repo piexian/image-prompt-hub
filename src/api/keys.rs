@@ -55,10 +55,27 @@ fn escape_html(text: &str) -> String {
 }
 
 fn page_shell(title: &str, body: &str) -> String {
+    // 共用样式：居中卡片与胶囊形主按钮；CSP 只允许内联样式，不引入脚本与外部资源
     format!(
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>{}</title></head><body style=\"font-family:system-ui,sans-serif;max-width:32em;margin:4em auto;padding:0 1em;line-height:1.6\">{}</body></html>",
+         <title>{}</title>\
+         <style>\
+         body{{margin:0;padding:2rem 1rem;background:#F4F1FF;color:#2D2A4A;\
+         font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;\
+         line-height:1.6;min-height:100vh;box-sizing:border-box;display:flex;\
+         align-items:flex-start;justify-content:center}}\
+         .card{{background:#fff;max-width:32em;width:100%;padding:2rem 1.75rem;\
+         border-radius:16px;box-shadow:0 4px 24px rgba(108,92,231,.12);\
+         border-top:4px solid #6C5CE7;box-sizing:border-box;margin:2rem 0}}\
+         h1{{color:#6C5CE7;font-size:1.35rem;margin:0 0 .75rem}}\
+         p{{color:#2D2A4A;margin:.5rem 0}}\
+         button{{background:#F76707;color:#fff;border:none;border-radius:999px;\
+         padding:.65rem 1.75rem;font-size:1rem;font-weight:600;cursor:pointer;\
+         margin-top:.75rem}}\
+         button:hover{{background:#e85c06}}\
+         </style></head>\
+         <body><main class=\"card\">{}</main></body></html>",
         escape_html(title),
         body
     )
@@ -254,9 +271,19 @@ async fn confirm_verification(state: AppState, token: String) -> Result<Response
         ));
     }
 
+    // 邮件里的吊销链接：无状态 HMAC 令牌，打开确认页才真正吊销
+    let revoke_link = format!(
+        "{}/v1/keys/revoke?token={}",
+        state.config.public_base_url,
+        state.config.revoke_token(key_id)
+    );
     if let Err(error) = state
         .mailer
-        .send(&email, API_KEY_SUBJECT, &api_key_email_body(&new_key))
+        .send(
+            &email,
+            API_KEY_SUBJECT,
+            &api_key_email_body(&new_key, &revoke_link),
+        )
         .await
     {
         tracing::error!(error = %redact_emails(&error), purpose = %purpose, "密钥邮件发送失败");
@@ -354,6 +381,121 @@ fn unfinished_page() -> Response {
         ),
         StatusCode::OK,
     )
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct RevokePageParams {
+    pub token: Option<String>,
+}
+
+/// 通用无效页：不区分令牌坏、密钥不存在还是已吊销。
+fn revoke_invalid_page() -> Response {
+    html_response(
+        page_shell(
+            "链接无效",
+            "<h1>链接无效</h1><p>这个链接无效，或这把密钥已经被吊销。</p>",
+        ),
+        StatusCode::OK,
+    )
+}
+
+/// 查令牌对应的密钥前缀；仅当令牌有效且密钥当前是 active 时返回。
+async fn active_key_prefix(state: &AppState, token: &str) -> Result<Option<String>, ApiError> {
+    let Some(key_id) = state.config.verify_revoke_token(token) else {
+        return Ok(None);
+    };
+    let prefix: Option<String> =
+        sqlx::query_scalar("SELECT key_prefix FROM api_keys WHERE id = $1 AND status = 'active'")
+            .bind(key_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    Ok(prefix)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/keys/revoke",
+    operation_id = "revoke_page",
+    tag = "keys",
+    params(("token" = String, Query, description = "邮件里的吊销令牌")),
+    responses(
+        (status = 200, description = "确认页（仅 active 密钥）或通用无效页。GET 不改变任何状态"),
+    )
+)]
+/// 吊销确认页。邮箱安全扫描会自动访问链接，因此 GET 绝不改变状态。
+pub async fn revoke_page(
+    State(state): State<AppState>,
+    ctx: RequestContext,
+    Query(params): Query<RevokePageParams>,
+) -> Result<Response, ApiError> {
+    state.limits.check_key_verify(&ctx.ip_hash)?;
+    let token = params.token.unwrap_or_default();
+    let prefix = active_key_prefix(&state, &token).await?;
+    let Some(key_prefix) = prefix else {
+        return Ok(revoke_invalid_page());
+    };
+    let page = page_shell(
+        "确认吊销",
+        &format!(
+            "<h1>确认吊销密钥</h1>\
+             <p>即将吊销密钥 <code>{}</code>。</p>\
+             <p>吊销后使用这把密钥的插件会立刻失效。</p>\
+             <p>之后可以用同一个邮箱重新申请新密钥。</p>\
+             <form method=\"post\" action=\"/v1/keys/revoke\">\
+             <input type=\"hidden\" name=\"token\" value=\"{}\">\
+             <button type=\"submit\">确认吊销</button></form>",
+            escape_html(&key_prefix),
+            escape_html(&token),
+        ),
+    );
+    Ok(html_response(page, StatusCode::OK))
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct RevokeForm {
+    pub token: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/keys/revoke",
+    operation_id = "revoke_confirm",
+    tag = "keys",
+    request_body(content = RevokeForm, content_type = "application/x-www-form-urlencoded"),
+    responses(
+        (status = 200, description = "\"密钥已吊销\"页；令牌无效或密钥非 active 时为通用无效页（幂等）"),
+    )
+)]
+/// 确认吊销：条件更新保证幂等，重复提交显示同一无效页。
+pub async fn revoke_confirm(
+    State(state): State<AppState>,
+    ctx: RequestContext,
+    Form(form): Form<RevokeForm>,
+) -> Result<Response, ApiError> {
+    state.limits.check_key_verify(&ctx.ip_hash)?;
+    let Some(key_id) = state.config.verify_revoke_token(&form.token) else {
+        return Ok(revoke_invalid_page());
+    };
+    let result = sqlx::query(
+        "UPDATE api_keys SET status = 'revoked', revoked_at = now() WHERE id = $1 AND status = 'active'",
+    )
+    .bind(key_id)
+    .execute(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+    if result.rows_affected() == 1 {
+        // 日志只记事件本身，不含令牌与密钥内容
+        tracing::info!("密钥已通过邮件链接吊销");
+        Ok(html_response(
+            page_shell(
+                "已吊销",
+                "<h1>密钥已吊销</h1><p>使用这把密钥的插件会立刻失效。需要新密钥时，用同一个邮箱重新申请即可。</p>",
+            ),
+            StatusCode::OK,
+        ))
+    } else {
+        Ok(revoke_invalid_page())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]

@@ -63,6 +63,19 @@ pub fn hmac_hex(secret: &[u8], data: &[u8]) -> String {
     hex(&mac.finalize().into_bytes())
 }
 
+/// 常量时间字节比较：长度不同直接返回 false（长度本身不是秘密），
+/// 其余情况逐字节累积差异，避免用 `==` 造成时序泄漏。
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);

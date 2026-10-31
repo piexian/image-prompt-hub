@@ -111,6 +111,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/keys/verify",
             get(keys::verify_page).post(keys::verify_confirm),
         )
+        .route(
+            "/v1/keys/revoke",
+            get(keys::revoke_page).post(keys::revoke_confirm),
+        )
         // 需要密钥
         .route("/v1/key", get(keys::key_info).delete(keys::revoke_own_key))
         .route("/v1/templates/import", import_route)
@@ -192,6 +196,9 @@ mod tests {
             (Method::GET, "/v1/me/templates"),
             (Method::GET, "/v1/key"),
             (Method::GET, "/v1/keys/verify"),
+            (Method::POST, "/v1/keys/verify"),
+            (Method::GET, "/v1/keys/revoke"),
+            (Method::POST, "/v1/keys/revoke"),
             (Method::POST, "/v1/keys/request"),
             (Method::GET, "/v1/admin/reports"),
             (Method::GET, "/v1/templates/abcdefghijk2/report"),

@@ -458,6 +458,31 @@ impl Config {
         self.email_hmac(&crate::validate::email_identity(email))
     }
 
+    /// 无状态吊销令牌：`"{key_id}.{mac}"`，mac 以 "revoke-v1:{key_id}" 为消息、
+    /// KEY_PEPPER 为密钥。不落库，泄露 KEY_PEPPER 前不可伪造。
+    pub fn revoke_token(&self, key_id: uuid::Uuid) -> String {
+        let mac = crypto::hmac_hex(
+            self.secrets.key_pepper.as_bytes(),
+            format!("revoke-v1:{key_id}").as_bytes(),
+        );
+        format!("{key_id}.{mac}")
+    }
+
+    /// 校验吊销令牌。解析失败、长度不对、MAC 不符一律返回 None，不区分原因。
+    pub fn verify_revoke_token(&self, token: &str) -> Option<uuid::Uuid> {
+        let (id_part, mac) = token.split_once('.')?;
+        let key_id = uuid::Uuid::parse_str(id_part).ok()?;
+        let expected = crypto::hmac_hex(
+            self.secrets.key_pepper.as_bytes(),
+            format!("revoke-v1:{key_id}").as_bytes(),
+        );
+        if crypto::constant_time_eq(mac.as_bytes(), expected.as_bytes()) {
+            Some(key_id)
+        } else {
+            None
+        }
+    }
+
     pub fn ip_hash(&self, ip: &str) -> String {
         crypto::hmac_hex(self.secrets.ip_hash_secret.as_bytes(), ip.as_bytes())
     }
@@ -825,6 +850,39 @@ mod tests {
                 .or_else(|| example.get(key).cloned())
         });
         assert!(merged.is_ok(), "补全密钥后样例应合法：{merged:?}");
+    }
+
+    #[test]
+    fn revoke_token_roundtrip_and_rejects() {
+        let mut config = Config::default();
+        config.secrets.key_pepper = "revoke-token-test-pepper-0123456789ab".to_string();
+        let key_id = uuid::Uuid::new_v4();
+
+        let token = config.revoke_token(key_id);
+        assert_eq!(config.verify_revoke_token(&token), Some(key_id));
+
+        // 换一把密钥的 ID：MAC 对不上
+        let other = config.revoke_token(uuid::Uuid::new_v4());
+        let other_id = other.split('.').next().unwrap().to_string();
+        let my_mac = token.split('.').nth(1).unwrap();
+        assert_eq!(
+            config.verify_revoke_token(&format!("{other_id}.{my_mac}")),
+            None
+        );
+        // 篡改 MAC 末位
+        let mut tampered = token.clone();
+        let last = tampered.pop().unwrap();
+        tampered.push(if last == 'a' { 'b' } else { 'a' });
+        assert_eq!(config.verify_revoke_token(&tampered), None);
+        // 空、乱码、缺段
+        assert_eq!(config.verify_revoke_token(""), None);
+        assert_eq!(config.verify_revoke_token("garbage"), None);
+        assert_eq!(config.verify_revoke_token("no-mac-here-at-all"), None);
+        // 胡乱 id 段
+        assert_eq!(config.verify_revoke_token("not-a-uuid.deadbeef"), None);
+        // 不同 pepper 无法通过
+        config.secrets.key_pepper = "another-pepper-value-0123456789abcdef".to_string();
+        assert_eq!(config.verify_revoke_token(&token), None);
     }
 
     #[test]
