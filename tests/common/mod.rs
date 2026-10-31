@@ -31,6 +31,8 @@ pub struct TestApp {
     schema: String,
     admin_url: String,
     server: Option<tokio::task::JoinHandle<()>>,
+    /// 检索索引与目录快照的数据目录；放在最后，等服务和 schema 清理完再删除。
+    _data_dir: tempfile::TempDir,
 }
 
 static TRACING_INIT: std::sync::Once = std::sync::Once::new();
@@ -77,7 +79,11 @@ pub async fn setup(adjust: impl FnOnce(&mut Config)) -> Option<TestApp> {
     .expect("创建测试 schema 失败");
     admin.close().await;
 
-    let mut config = test_config(&url_with_search_path(&admin_url, &schema));
+    let data_dir = tempfile::Builder::new()
+        .prefix("iph-test-")
+        .tempdir()
+        .expect("创建测试数据目录失败");
+    let mut config = test_config(&url_with_search_path(&admin_url, &schema), data_dir.path());
     adjust(&mut config);
 
     let mailer = FakeMailer::new();
@@ -109,6 +115,7 @@ pub async fn setup(adjust: impl FnOnce(&mut Config)) -> Option<TestApp> {
         schema,
         admin_url,
         server: Some(server),
+        _data_dir: data_dir,
     })
 }
 
@@ -118,14 +125,14 @@ fn url_with_search_path(url: &str, schema: &str) -> String {
     format!("{url}{separator}options=-c%20search_path%3D{schema}")
 }
 
-fn test_config(database_url: &str) -> Config {
+fn test_config(database_url: &str, data_dir: &std::path::Path) -> Config {
     let mut key = [0u8; 32];
     rand::rng().fill_bytes(&mut key);
     // 默认额度放到足够大：触发限流的测试自己调小，其余测试不受请求节奏影响
     let generous = 1_000_000;
     Config {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
-        data_dir: std::env::temp_dir().join(format!("iph-test-{}", Uuid::new_v4().simple())),
+        data_dir: data_dir.to_path_buf(),
         public_base_url: "https://hub.test.example".to_string(),
         // 测试直连本机，不模拟 CF 头
         trust_cf_connecting_ip: false,

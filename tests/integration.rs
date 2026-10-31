@@ -530,47 +530,87 @@ async fn request_response_identical_for_existing_and_new_email() {
     );
 }
 
-/// 冷却与每日上限不依赖真实时钟。
+/// 同一邮箱的验证邮件冷却：冷却内再申请得到 429 和 Retry-After，改库时间越过冷却后恢复。
 #[tokio::test]
-async fn cooldown_daily_limit_and_token_states() {
+async fn email_cooldown_blocks_repeat_requests_until_it_expires() {
+    let Some(app) = app().await else { return };
+
+    assert_eq!(app.request_key("limit@qq.com").await.status(), 202);
+    let second = app.request_key("limit@qq.com").await;
+    assert_eq!(second.status(), 429);
+    let retry_after: u64 = second.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        (1..=600).contains(&retry_after),
+        "Retry-After 应是冷却剩余秒数：{retry_after}"
+    );
+    // 其他邮箱不受影响
+    assert_eq!(app.request_key("other-limit@qq.com").await.status(), 202);
+
+    app.backdate_verifications("limit@qq.com").await;
+    assert_eq!(app.request_key("limit@qq.com").await.status(), 202);
+}
+
+/// 每日上限按“今天”的日历日统计。
+///
+/// 被统计的记录必须属于今天，又要早于冷却窗口，所以这里把冷却缩到最短，
+/// 并把记录时间放到今天零点，不用“往前推若干小时”——那样在 UTC 零点后的头几个小时里
+/// 会把记录推到昨天，测试结果就取决于运行时刻。
+#[tokio::test]
+async fn daily_limit_counts_requests_made_today() {
     let Some(app) = app_with(|config| {
-        config.email_cooldown_secs = 600;
+        config.email_cooldown_secs = 1;
         config.email_per_day_limit = 2;
-        config.rate_limits.key_request_per_hour = 100;
     })
     .await
     else {
         return;
     };
 
-    let request = |email: &str| {
-        let app = &app;
-        let email = email.to_string();
-        async move {
-            app.client
-                .post(app.url("/v1/keys/request"))
-                .json(&serde_json::json!({"email": email}))
-                .send()
-                .await
-                .unwrap()
-        }
+    // 只有午夜后的头几秒里造不出“早于冷却的今天的记录”，等它过去
+    let since_midnight: f64 =
+        sqlx::query_scalar("SELECT extract(epoch FROM now() - date_trunc('day', now()))::float8")
+            .fetch_one(&app.state.pool)
+            .await
+            .unwrap();
+    if since_midnight < 5.0 {
+        tokio::time::sleep(std::time::Duration::from_secs_f64(5.0 - since_midnight)).await;
+    }
+    let age_into_today = || async {
+        sqlx::query("UPDATE email_verifications SET created_at = date_trunc('day', now())")
+            .execute(&app.state.pool)
+            .await
+            .unwrap();
     };
 
-    // 冷却：同一邮箱立即二次请求 → 429（无需等待）
-    assert_eq!(request("limit@qq.com").await.status(), 202);
-    let second = request("limit@qq.com").await;
-    assert_eq!(second.status(), 429);
-    assert!(second.headers().contains_key("retry-after"));
+    assert_eq!(app.request_key("daily@qq.com").await.status(), 202);
+    age_into_today().await;
+    assert_eq!(app.request_key("daily@qq.com").await.status(), 202);
+    age_into_today().await;
+    let third = app.request_key("daily@qq.com").await;
+    assert_eq!(third.status(), 429, "今天已申请 2 次，第 3 次应撞每日上限");
+    assert!(third.headers().contains_key("retry-after"));
 
-    // 每日上限 2 封：改库时间绕过冷却后再发第二封，第三次撞每日上限
-    app.backdate_verifications("limit@qq.com").await;
-    assert_eq!(request("limit@qq.com").await.status(), 202);
-    app.backdate_verifications("limit@qq.com").await;
-    let third = request("limit@qq.com").await;
-    assert_eq!(third.status(), 429);
+    // 昨天的记录不计入今天
+    sqlx::query("UPDATE email_verifications SET created_at = date_trunc('day', now()) - interval '1 second'")
+        .execute(&app.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(app.request_key("daily@qq.com").await.status(), 202);
+    // 其他邮箱不受影响
+    assert_eq!(app.request_key("daily-other@qq.com").await.status(), 202);
+}
 
-    // 令牌过期：把过期时间改到过去（不睡眠）
-    assert_eq!(request("expire@qq.com").await.status(), 202);
+/// 令牌过期、重复使用都被拒绝（过期时间直接改库，不睡眠）。
+#[tokio::test]
+async fn expired_and_reused_tokens_are_rejected() {
+    let Some(app) = app().await else { return };
+
+    // 令牌过期
+    assert_eq!(app.request_key("expire@qq.com").await.status(), 202);
     let token = app.latest_verification_token().await;
     sqlx::query("UPDATE email_verifications SET expires_at = now() - interval '1 hour'")
         .execute(&app.state.pool)
@@ -583,34 +623,18 @@ async fn cooldown_daily_limit_and_token_states() {
         .await
         .unwrap();
     assert!(page.text().await.unwrap().contains("链接无效"));
-    let confirm = app
-        .client
-        .post(app.url("/v1/keys/verify"))
-        .form(&[("token", token.as_str())])
-        .send()
-        .await
-        .unwrap();
+    let confirm = app.confirm_token(&token).await;
     assert!(confirm.text().await.unwrap().contains("链接无效"));
+    assert_eq!(app.count_keys("expire@qq.com", "active").await, 0);
 
     // 令牌重复使用
-    assert_eq!(request("reuse@qq.com").await.status(), 202);
+    assert_eq!(app.request_key("reuse@qq.com").await.status(), 202);
     let token = app.latest_verification_token().await;
-    let confirm = app
-        .client
-        .post(app.url("/v1/keys/verify"))
-        .form(&[("token", token.as_str())])
-        .send()
-        .await
-        .unwrap();
+    let confirm = app.confirm_token(&token).await;
     assert!(confirm.text().await.unwrap().contains("密钥已发送到邮箱"));
-    let confirm = app
-        .client
-        .post(app.url("/v1/keys/verify"))
-        .form(&[("token", token.as_str())])
-        .send()
-        .await
-        .unwrap();
+    let confirm = app.confirm_token(&token).await;
     assert!(confirm.text().await.unwrap().contains("链接无效"));
+    assert_eq!(app.count_keys("reuse@qq.com", "active").await, 1);
 }
 
 fn template_json(name: &str, content: &str) -> serde_json::Value {
