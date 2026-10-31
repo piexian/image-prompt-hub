@@ -324,6 +324,30 @@ impl TestApp {
         assert!(waited.is_ok(), "等待后台发信任务超时");
     }
 
+    /// 轮询等待目录快照哈希离开给定值（带超时与失败信息）。
+    pub async fn wait_catalog_hash_changes(&self, previous: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let value: serde_json::Value = self
+                .client
+                .get(self.url("/v1/catalog/version"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let current = value["hash"].as_str().unwrap_or_default();
+            if !current.is_empty() && current != previous {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("等待目录快照哈希变化超时：{previous} -> {current}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
+
     /// 把该邮箱最近的验证记录时间整体前移，绕过冷却窗口（代替睡眠等待）。
     pub async fn backdate_verifications(&self, email: &str) {
         let email_hmac = self.state.config.account_hmac(email);

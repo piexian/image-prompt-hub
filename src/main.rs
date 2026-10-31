@@ -265,8 +265,8 @@ async fn admin_ban(
     );
     if !outcome.hidden_template_ids.is_empty() {
         println!(
-            "提示：命令行不会通知运行中的服务，被隐藏的模板要等服务重启后才会从检索索引和目录快照里消失；\
-             服务运行时请优先使用 POST /v1/admin/accounts/ban。"
+            "提示：运行中的服务会在约 {} 秒内把被隐藏的模板从检索和目录快照里去掉。",
+            config.index_sync_interval_secs
         );
     }
     Ok(())

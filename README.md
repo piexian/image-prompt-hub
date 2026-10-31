@@ -48,7 +48,7 @@ image-prompt-hub admin unban --email <邮箱>
 ```
 
 - `reindex` 只重建检索索引，不生成目录快照。服务运行时索引目录的写锁被占用，命令会失败并提示“请先停止服务”。服务每次启动本来就会按数据库整体重建索引。
-- `admin ban` 吊销该账号全部密钥；加 `--hide-templates` 时把其全部公开模板改为隐藏。命令行不会通知运行中的服务，被隐藏的模板要等服务重启后才会从检索索引和目录快照里消失，服务运行时请优先用管理接口 `POST /v1/admin/accounts/ban`。
+- `admin ban` 吊销该账号全部密钥；加 `--hide-templates` 时把其全部公开模板改为隐藏。运行中的服务由后台对账任务在约 `INDEX_SYNC_INTERVAL_SECS` 秒内把被隐藏的模板从检索索引和目录快照里去掉，无需重启。
 - `admin unban` 只解除封禁，不自动恢复模板。
 - `admin create-key` 拒绝为被封禁账号创建密钥，需要先 `unban`。
 - 被封禁账号的邮箱调用 `POST /v1/keys/request` 仍得到与其他邮箱完全一致的 202，冷却与每日上限也照常生效（不暴露封禁状态），但不会发信，封禁前发出的确认链接会被拒绝。
@@ -83,6 +83,7 @@ image-prompt-hub admin unban --email <邮箱>
 | `ACCOUNT_CREATE_PER_HOUR` | `100` | 账号每小时新建模板条数（导入逐条计入，超出 429） |
 | `ACCOUNT_TEMPLATE_LIMIT` | `1000` | 账号未删除模板总数上限（超出 403） |
 | `CATALOG_DEBOUNCE_SECS` | `60` | 数据变动后多久重新生成目录快照 |
+| `INDEX_SYNC_INTERVAL_SECS` | `30` | 检索索引对账间隔：把绕过接口被隐藏的模板从索引与快照里去掉；回看窗口至少 5 分钟，并随间隔自动放宽（2 倍间隔 + 60 秒） |
 | `RATE_ANON_READ_PER_MIN` | `60` | 匿名读限流（每 IP） |
 | `RATE_KEYED_READ_PER_MIN` | `600` | 带密钥读限流（每密钥） |
 | `RATE_WRITE_PER_MIN` | `60` | 写限流（每密钥） |

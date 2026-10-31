@@ -153,6 +153,8 @@ pub struct Config {
     pub account_create_per_hour: u32,
     pub account_template_limit: u32,
     pub catalog_debounce_secs: u64,
+    /// 检索索引对账间隔：兜底把绕过 HTTP 接口被隐藏的模板从索引里去掉。
+    pub index_sync_interval_secs: u64,
     pub rate_limits: RateLimitConfig,
     pub log_format: LogFormat,
 }
@@ -175,6 +177,7 @@ impl std::fmt::Debug for Config {
             .field("account_create_per_hour", &self.account_create_per_hour)
             .field("account_template_limit", &self.account_template_limit)
             .field("catalog_debounce_secs", &self.catalog_debounce_secs)
+            .field("index_sync_interval_secs", &self.index_sync_interval_secs)
             .field("rate_limits", &self.rate_limits)
             .field("log_format", &self.log_format)
             .finish()
@@ -223,6 +226,7 @@ impl Default for Config {
             account_create_per_hour: 100,
             account_template_limit: 1000,
             catalog_debounce_secs: 60,
+            index_sync_interval_secs: 30,
             rate_limits: RateLimitConfig::default(),
             log_format: LogFormat::Pretty,
         }
@@ -392,6 +396,8 @@ impl Config {
             env_parse(lookup, "ACCOUNT_CREATE_PER_HOUR", 100u32, 1u32)?;
         config.account_template_limit = env_parse(lookup, "ACCOUNT_TEMPLATE_LIMIT", 1000u32, 1u32)?;
         config.catalog_debounce_secs = env_parse(lookup, "CATALOG_DEBOUNCE_SECS", 60u64, 0u64)?;
+        config.index_sync_interval_secs =
+            env_parse(lookup, "INDEX_SYNC_INTERVAL_SECS", 30u64, 1u64)?;
         let defaults = RateLimitConfig::default();
         config.rate_limits = RateLimitConfig {
             anon_read_per_min: env_parse(

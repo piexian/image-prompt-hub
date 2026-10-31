@@ -2560,3 +2560,79 @@ async fn root_index_page() {
     assert_eq!(head.status(), 200);
     assert!(head.headers().contains_key("content-security-policy"));
 }
+
+/// 索引对账任务：命令行/库级封禁隐藏的模板在短间隔内从检索与目录快照里消失，
+/// 解封（不恢复模板）后依旧不可检索。
+#[tokio::test]
+async fn hidden_templates_disappear_via_index_sync_task() {
+    let Some(app) = app_with(|config| {
+        config.index_sync_interval_secs = 1;
+        config.catalog_debounce_secs = 0;
+    })
+    .await
+    else {
+        return;
+    };
+    let key = app
+        .create_key_direct("sync@qq.com", &["read", "write"])
+        .await;
+
+    // 上传并等待可检索
+    let response = app
+        .client
+        .post(app.url("/v1/templates"))
+        .bearer_auth(&key)
+        .json(&template_json("赛博朋克同步", "赛博朋克风格 {{input}}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let created: serde_json::Value = response.json().await.unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    app.wait_search("赛博朋克", &id, true).await;
+
+    let version: serde_json::Value = app
+        .client
+        .get(app.url("/v1/catalog/version"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let hash_before = version["hash"].as_str().unwrap().to_string();
+
+    // 绕过 HTTP 接口直接在库里封禁并隐藏（模拟命令行 admin ban --hide-templates）
+    let email_hmac = app.state.config.account_hmac("sync@qq.com");
+    image_prompt_hub::accounts::ban(&app.state.pool, &email_hmac, "对账测试", true)
+        .await
+        .expect("封禁失败");
+
+    // 对账任务在约 1 秒内提交删除：检索消失、快照哈希变化
+    app.wait_search("赛博朋克", &id, false).await;
+    app.wait_catalog_hash_changes(&hash_before).await;
+
+    // 解封不恢复模板：依旧不可检索、不在快照里
+    assert!(
+        image_prompt_hub::accounts::unban(&app.state.pool, &email_hmac)
+            .await
+            .expect("解封失败")
+    );
+    let listed = app
+        .client
+        .get(app.url("/v1/templates"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(
+        !listed["templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"].as_str() == Some(id.as_str())),
+        "解封后模板仍应保持隐藏"
+    );
+}

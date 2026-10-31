@@ -67,6 +67,12 @@ pub async fn build_state(config: Config, mailer: Arc<dyn Mailer>) -> Result<AppS
     let cipher = EmailCipher::new(&config.secrets.email_enc_key);
 
     crate::catalog::spawn_worker(catalog.clone(), pool.clone(), config.catalog_debounce_secs);
+    spawn_index_sync_worker(
+        index.clone(),
+        catalog.clone(),
+        pool.clone(),
+        config.index_sync_interval_secs,
+    );
     spawn_cleanup_worker(pool.clone());
     spawn_ratelimit_retention_worker(limits.clone());
 
@@ -80,6 +86,53 @@ pub async fn build_state(config: Config, mailer: Arc<dyn Mailer>) -> Result<AppS
         cipher,
         mail_tasks: tokio_util::task::TaskTracker::new(),
     })))
+}
+
+/// 对账回看秒数：至少 5 分钟，且覆盖两个对账周期（多留 60 秒余量），
+/// 防止对账间隔超过 5 分钟时隐藏操作落在窗口外被漏掉。
+pub fn index_sync_lookback_secs(interval_secs: u64) -> u64 {
+    interval_secs.saturating_mul(2).saturating_add(60).max(300)
+}
+
+/// 检索索引对账：定期把最近被隐藏的模板从索引与目录快照里去掉。
+/// 不依赖通知，对任何绕过 HTTP 接口的隐藏（如命令行 ban）都有效；
+/// 提交的 Delete 由索引后台任务按数据库当前状态执行，重复提交幂等。
+/// 5 分钟回看窗口让较长的事务或错过的轮次也能被后续轮次补上。
+fn spawn_index_sync_worker(
+    index: crate::search::SearchIndex,
+    catalog: Catalog,
+    pool: PgPool,
+    interval_secs: u64,
+) {
+    // 回看窗口随间隔自动放宽，间隔大时也能覆盖到两轮之间被隐藏的模板
+    let lookback_secs = index_sync_lookback_secs(interval_secs);
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(interval_secs.max(1)));
+        loop {
+            interval.tick().await;
+            let hidden: Result<Vec<String>, _> = sqlx::query_scalar(
+                "SELECT id FROM templates
+                 WHERE status = 'hidden' AND updated_at >= now() - make_interval(secs => $1)",
+            )
+            .bind(lookback_secs as f64)
+            .fetch_all(&pool)
+            .await;
+            match hidden {
+                Ok(ids) if ids.is_empty() => {}
+                Ok(ids) => {
+                    for id in &ids {
+                        index.submit(crate::search::IndexOp::Delete(id.clone()));
+                    }
+                    catalog.mark_dirty();
+                }
+                Err(error) => {
+                    // 查询失败只记日志，下一轮继续
+                    tracing::error!(error = %error, "索引对账查询失败");
+                }
+            }
+        }
+    });
 }
 
 /// 每 5 分钟清理限流器里已恢复满额度的键并收缩存储，防止按 IP/密钥的状态无限增长。
@@ -133,5 +186,24 @@ pub async fn run_cleanup(pool: &PgPool) {
     .await
     {
         tracing::error!(error = %error, "清理 pending 密钥失败");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::index_sync_lookback_secs;
+
+    #[test]
+    fn lookback_covers_interval_and_floor() {
+        // 小间隔回落到 5 分钟下限
+        assert_eq!(index_sync_lookback_secs(1), 300);
+        assert_eq!(index_sync_lookback_secs(30), 300);
+        assert_eq!(index_sync_lookback_secs(120), 300);
+        // 间隔 10 分钟：2 倍加 60 = 1260
+        assert_eq!(index_sync_lookback_secs(600), 1260);
+        assert_eq!(index_sync_lookback_secs(300), 660);
+        // 极大间隔不溢出
+        assert_eq!(index_sync_lookback_secs(u64::MAX), u64::MAX);
+        assert_eq!(index_sync_lookback_secs(u64::MAX / 2 + 1), u64::MAX);
     }
 }
