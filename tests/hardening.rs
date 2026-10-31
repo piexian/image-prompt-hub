@@ -587,6 +587,21 @@ async fn list_pagination_walks_every_template_once() {
         created.push(body["id"].as_str().unwrap().to_string());
     }
 
+    // 本机时钟可能被回拨，创建顺序不保证与 updated_at 顺序一致；
+    // 用固定基准时间加创建序偏移作为参数写入递增时间戳，完全不依赖系统时钟。
+    let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00+00:00")
+        .expect("固定基准时间有效")
+        .with_timezone(&chrono::Utc);
+    for (i, id) in created.iter().enumerate() {
+        let at = base + chrono::Duration::seconds(i as i64);
+        sqlx::query("UPDATE templates SET created_at = $1, updated_at = $1 WHERE id = $2")
+            .bind(at)
+            .bind(id)
+            .execute(&app.state.pool)
+            .await
+            .expect("写入递增时间戳失败");
+    }
+
     for (tag, expected) in [("", 5usize), ("全部", 5), ("偶数", 3), ("奇数", 2)] {
         let mut seen = Vec::new();
         let mut sizes = Vec::new();
