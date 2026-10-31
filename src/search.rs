@@ -27,8 +27,9 @@ const SEL_PUBLISHED_BY_IDS: &str = "SELECT id, name, ai_description, content, de
 
 const SEL_ALL_PUBLISHED: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' ORDER BY id";
 
-/// 索引结构版本，不匹配时启动重建。
-const INDEX_VERSION: u32 = 1;
+/// 索引目录的版本，与磁盘上的版本文件不一致时清空目录重建。升级 tantivy 或改动字段结构时提高它：
+/// 索引随时可以从数据库重建，不依赖新版本读取旧版本写出的文件。
+const INDEX_VERSION: u32 = 2;
 const WRITER_HEAP_BYTES: usize = 50 * 1024 * 1024;
 /// 提交合并窗口：窗口内的多次变更一次 commit；提交失败时也以它为重试间隔。
 const COMMIT_MERGE_WINDOW: Duration = Duration::from_secs(1);
@@ -712,6 +713,38 @@ mod tests {
         // 释放后可以重新打开
         drop(running);
         assert!(SearchIndex::open_dir(&index_dir).is_ok());
+    }
+
+    /// 版本文件与当前版本不一致（例如升级 tantivy 之前写出的目录）：整个目录清空重建，
+    /// 旧文件即使无法被新版本读取也不会让启动失败。
+    #[test]
+    fn stale_version_directory_is_wiped_and_recreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_dir = dir.path().join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::write(
+            index_dir.join("iph-index-version.json"),
+            serde_json::json!({"version": INDEX_VERSION - 1}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(index_dir.join("meta.json"), "不是合法的 tantivy 元数据").unwrap();
+        std::fs::write(index_dir.join("leftover.bin"), b"junk").unwrap();
+
+        let (index, _rx) =
+            SearchIndex::open_dir(&index_dir).expect("版本不符时应清空目录重建，而不是打开失败");
+        assert_eq!(index.doc_count(), 0);
+        assert!(!index_dir.join("leftover.bin").exists(), "旧文件应被清掉");
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(index_dir.join("iph-index-version.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["version"], INDEX_VERSION);
+
+        // 重建后的目录可以正常写入和检索
+        index
+            .reindex_with(vec![row("a", "新目录", &[], "", "rebuilt")])
+            .unwrap();
+        assert_eq!(index.search("rebuilt", None, 0, 10).unwrap().hits.len(), 1);
     }
 
     #[test]
