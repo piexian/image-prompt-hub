@@ -23,9 +23,9 @@ use tokio::sync::mpsc;
 use crate::error::{ApiError, ErrorCode};
 use crate::models::TemplateRow;
 
-const SEL_PUBLISHED_BY_IDS: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' AND id = ANY($1)";
+const SEL_PUBLISHED_BY_IDS: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' AND id = ANY($1)";
 
-const SEL_ALL_PUBLISHED: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' ORDER BY id";
+const SEL_ALL_PUBLISHED: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' ORDER BY id";
 
 /// 索引目录的版本，与磁盘上的版本文件不一致时清空目录重建。升级 tantivy 或改动字段结构时提高它：
 /// 索引随时可以从数据库重建，不依赖新版本读取旧版本写出的文件。
@@ -523,6 +523,7 @@ mod tests {
             reference: "none".to_string(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
             author: None,
+            source_url: None,
             owner_key_id: Uuid::new_v4(),
             owner_email_hmac: "hmac-test".to_string(),
             status: "published".to_string(),

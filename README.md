@@ -186,6 +186,14 @@ systemctl restart image-prompt-hub
 
 回滚就是把软链指回旧版本目录再重启。数据库迁移在启动时自动执行，只增不改已应用的迁移文件。
 
+回滚前要先看新版本有没有带迁移：迁移器会拒绝启动比数据库旧的版本（报 `migration N was previously applied but is missing in the resolved migrations`）。新版本应用过旧版本不认识的迁移时（例如 `0002_template_source_url.sql`），先在库里删掉这些迁移记录，再切回旧版本：
+
+```sql
+DELETE FROM _sqlx_migrations WHERE version > <旧版本认识的最大迁移号>;
+```
+
+只删记录，不删迁移加的列或表：旧版本的 SQL 都写明了列名，会忽略多出来的列。迁移文件要写成可重复执行（`IF NOT EXISTS`），这样再次升级时重新应用也不会报错。
+
 ### 备份
 
 - 数据库：定期 `pg_dump`（密钥只存哈希，但模板、密钥记录与举报都在库里）。

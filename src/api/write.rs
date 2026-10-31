@@ -17,10 +17,10 @@ use crate::state::AppState;
 use crate::validate::{validate_upsert, TemplateUpsert};
 
 /// ID 撞上主键时不报错、不返回行，由调用方换 ID 重试（报错会让事务进入失败状态）。
-const INS_TEMPLATE: &str = "INSERT INTO templates (id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING RETURNING id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at";
-const SEL_TEMPLATE_BY_ID: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE id = $1 AND status <> 'deleted'";
-const UPD_TEMPLATE: &str = "UPDATE templates SET name = $2, ai_description = $3, content = $4, defaults = $5, reference = $6, tags = $7, author = $8, version = version + 1, updated_at = now() WHERE id = $1 AND version = $9 AND status <> 'deleted' RETURNING id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at";
-const SEL_MY_TEMPLATES: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE owner_email_hmac = $1 AND status <> 'deleted' ORDER BY updated_at DESC";
+const INS_TEMPLATE: &str = "INSERT INTO templates (id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING RETURNING id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac, status, version, created_at, updated_at";
+const SEL_TEMPLATE_BY_ID: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE id = $1 AND status <> 'deleted'";
+const UPD_TEMPLATE: &str = "UPDATE templates SET name = $2, ai_description = $3, content = $4, defaults = $5, reference = $6, tags = $7, author = $8, source_url = $9, version = version + 1, updated_at = now() WHERE id = $1 AND version = $10 AND status <> 'deleted' RETURNING id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac, status, version, created_at, updated_at";
+const SEL_MY_TEMPLATES: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE owner_email_hmac = $1 AND status <> 'deleted' ORDER BY updated_at DESC";
 
 const IMPORT_MAX_ITEMS: usize = 50;
 
@@ -127,6 +127,7 @@ pub async fn create_template_row(
             .bind(&validated.reference)
             .bind(&validated.tags)
             .bind(&validated.author)
+            .bind(&validated.source_url)
             .bind(owner.id)
             .bind(&owner.email_hmac)
             .fetch_optional(&mut *tx)
@@ -186,6 +187,8 @@ pub struct TemplateUpsertDoc {
     pub reference: Option<String>,
     pub tags: Option<Vec<String>>,
     pub author: Option<String>,
+    /// 出处或许可页面的 https 链接，≤300 字，仅 https 公开域名。
+    pub source_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,6 +209,8 @@ pub struct ImportItem {
     pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub author: Option<String>,
+    #[serde(default)]
+    pub source_url: Option<String>,
     #[serde(default)]
     pub nsfw: Option<bool>,
     #[serde(default)]
@@ -229,6 +234,7 @@ impl ImportItem {
             reference: self.reference.clone(),
             tags: self.tags.clone(),
             author: self.author.clone(),
+            source_url: self.source_url.clone(),
             nsfw: self.nsfw,
         }
     }
@@ -332,6 +338,7 @@ pub async fn update_if_version(
         .bind(&validated.reference)
         .bind(&validated.tags)
         .bind(&validated.author)
+        .bind(&validated.source_url)
         .bind(expected_version)
         .fetch_optional(pool)
         .await?)

@@ -15,6 +15,7 @@ pub struct TemplateRow {
     pub reference: String,
     pub tags: Vec<String>,
     pub author: Option<String>,
+    pub source_url: Option<String>,
     pub owner_key_id: Uuid,
     pub owner_email_hmac: String,
     pub status: String,
@@ -36,6 +37,9 @@ pub struct TemplateJson {
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// 出处或许可页面的 https 链接；未提供时响应里不出现这个键。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
     pub version: i64,
     #[schema(value_type = String)]
     pub created_at: DateTime<Utc>,
@@ -54,6 +58,7 @@ impl From<TemplateRow> for TemplateJson {
             reference: row.reference,
             tags: row.tags,
             author: row.author,
+            source_url: row.source_url,
             version: row.version,
             created_at: row.created_at,
             updated_at: row.updated_at,

@@ -376,6 +376,25 @@ async fn nul_characters_in_inputs_never_cause_server_errors() {
         .await
         .unwrap();
     assert_eq!(ban.status(), 400);
+    // 出处链接里的 NUL 在校验阶段就被拒绝，不会走到数据库
+    let bad_source = app
+        .client
+        .post(app.url("/v1/templates"))
+        .bearer_auth(&key)
+        .json(&serde_json::json!({
+            "name": "出处含NUL",
+            "content": "内容 {{input}}",
+            "source_url": "https://example.com/a\u{0}b",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_source.status(), 400);
+    let bad_source: serde_json::Value = bad_source.json().await.unwrap();
+    assert!(bad_source["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("source_url"));
     // 名称、标签、说明、署名里的控制字符被剥掉后正常保存
     let created = app
         .client

@@ -834,6 +834,343 @@ async fn write_endpoints_and_permissions() {
     );
 }
 
+const SOURCE_URL: &str = "https://ai.google.dev/gemini-api/docs/image-generation";
+
+/// GET 并解析 JSON，状态码必须是 200。
+async fn get_json(app: &TestApp, path: &str, key: Option<&str>) -> serde_json::Value {
+    let mut request = app.client.get(app.url(path));
+    if let Some(key) = key {
+        request = request.bearer_auth(key);
+    }
+    let response = request.send().await.unwrap();
+    assert_eq!(response.status(), 200, "{path}");
+    response.json().await.unwrap()
+}
+
+/// 取目录快照并解压成 JSON 包。
+async fn fetch_catalog_package(app: &TestApp) -> serde_json::Value {
+    let response = app
+        .client
+        .get(app.url("/v1/catalog"))
+        .header("Accept-Encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let raw = response.bytes().await.unwrap();
+    let mut plain = Vec::new();
+    std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&raw[..]), &mut plain).unwrap();
+    serde_json::from_slice(&plain).unwrap()
+}
+
+/// 在模板数组里按 id 找一条。
+fn find_template<'a>(templates: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    templates
+        .as_array()
+        .expect("templates 应是数组")
+        .iter()
+        .find(|template| template["id"] == id)
+        .unwrap_or_else(|| panic!("结果里没有 {id}：{templates}"))
+}
+
+/// `Some` 时 source_url 等于给定值；`None` 时连这个键都不存在（而不是 null）。
+fn assert_source_url(template: &serde_json::Value, expected: Option<&str>, place: &str) {
+    match expected {
+        Some(url) => assert_eq!(template["source_url"], url, "{place}"),
+        None => assert!(
+            template.get("source_url").is_none(),
+            "{place} 不应出现 source_url 键：{template}"
+        ),
+    }
+}
+
+async fn stored_source_url(app: &TestApp, id: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT source_url FROM templates WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.state.pool)
+        .await
+        .unwrap()
+}
+
+/// 带出处的模板以规范化后的值出现在每条读取路径上；不带时响应里没有这个键。
+#[tokio::test]
+async fn source_url_is_stored_normalized_and_shown_on_every_read_path() {
+    let Some(app) = app().await else { return };
+    let key = app
+        .create_key_direct("source-url@qq.com", &["read", "write"])
+        .await;
+
+    // 大写主机名与两端空白在保存前被规范化
+    let mut with_source = template_json("赛博朋克", "赛博朋克风格的城市 {{input}}");
+    with_source["source_url"] =
+        serde_json::json!("  https://AI.Google.DEV/gemini-api/docs/image-generation  ");
+    let created = app
+        .client
+        .post(app.url("/v1/templates"))
+        .bearer_auth(&key)
+        .json(&with_source)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let created: serde_json::Value = created.json().await.unwrap();
+    assert_source_url(&created, Some(SOURCE_URL), "创建响应");
+    let with_id = created["id"].as_str().unwrap().to_string();
+
+    let created = app
+        .client
+        .post(app.url("/v1/templates"))
+        .bearer_auth(&key)
+        .json(&template_json("水墨山水", "水墨山水画 {{input}}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let created: serde_json::Value = created.json().await.unwrap();
+    assert_source_url(&created, None, "不带出处的创建响应");
+    let without_id = created["id"].as_str().unwrap().to_string();
+
+    assert_eq!(
+        stored_source_url(&app, &with_id).await.as_deref(),
+        Some(SOURCE_URL),
+        "库里存的是规范化后的值"
+    );
+    assert_eq!(stored_source_url(&app, &without_id).await, None);
+
+    app.wait_search("赛博朋克", &with_id, true).await;
+    app.wait_search("水墨山水", &without_id, true).await;
+    app.wait_catalog_count(2).await;
+
+    // 检索路径：每条命中各自带或不带这个键
+    let searched = get_json(&app, "/v1/templates?q=赛博朋克", None).await;
+    assert_source_url(
+        find_template(&searched["templates"], &with_id),
+        Some(SOURCE_URL),
+        "检索",
+    );
+    let searched = get_json(&app, "/v1/templates?q=水墨山水", None).await;
+    assert_source_url(
+        find_template(&searched["templates"], &without_id),
+        None,
+        "检索",
+    );
+
+    let detail = get_json(&app, &format!("/v1/templates/{with_id}"), None).await;
+    assert_source_url(&detail, Some(SOURCE_URL), "详情");
+    let detail = get_json(&app, &format!("/v1/templates/{without_id}"), None).await;
+    assert_source_url(&detail, None, "不带出处的详情");
+
+    let list = get_json(&app, "/v1/templates", None).await;
+    let by_tag = get_json(&app, "/v1/templates?tag=测试", None).await;
+    let batch = get_json(
+        &app,
+        &format!("/v1/templates/batch?ids={with_id},{without_id}"),
+        None,
+    )
+    .await;
+    let mine = get_json(&app, "/v1/me/templates", Some(&key)).await;
+    let catalog = fetch_catalog_package(&app).await;
+    for (place, templates) in [
+        ("列表", &list["templates"]),
+        ("按标签列表", &by_tag["templates"]),
+        ("批量", &batch["templates"]),
+        ("我的模板", &mine["templates"]),
+        ("目录快照", &catalog["templates"]),
+    ] {
+        assert_eq!(templates.as_array().unwrap().len(), 2, "{place}");
+        assert_source_url(find_template(templates, &with_id), Some(SOURCE_URL), place);
+        assert_source_url(find_template(templates, &without_id), None, place);
+    }
+
+    // OpenAPI 的字段说明里能看到新字段
+    let openapi = get_json(&app, "/openapi.json", None).await;
+    for schema in ["TemplateJson", "TemplateUpsertDoc"] {
+        let property = &openapi["components"]["schemas"][schema]["properties"]["source_url"];
+        assert!(property.is_object(), "{schema} 缺少 source_url：{openapi}");
+        assert!(
+            property["description"]
+                .as_str()
+                .unwrap_or("")
+                .contains("出处"),
+            "{schema}.source_url 缺少说明：{property}"
+        );
+    }
+}
+
+/// 修改按整体替换处理：带新值就更新，不带就清空；非法值一律 400，且不改动已有数据。
+#[tokio::test]
+async fn source_url_update_replaces_and_invalid_values_are_rejected() {
+    let Some(app) = app().await else { return };
+    let key = app
+        .create_key_direct("source-url-edit@qq.com", &["read", "write"])
+        .await;
+
+    let mut body = template_json("出处修改", "原始内容 {{input}}");
+    body["source_url"] = serde_json::json!("https://example.com/original");
+    let created = app
+        .client
+        .post(app.url("/v1/templates"))
+        .bearer_auth(&key)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let created: serde_json::Value = created.json().await.unwrap();
+    assert_source_url(&created, Some("https://example.com/original"), "创建响应");
+    assert_eq!(created["version"], 1);
+    let id = created["id"].as_str().unwrap().to_string();
+    let template_url = app.url(&format!("/v1/templates/{id}"));
+
+    // PUT 带新值：更新并规范化，version 加 1
+    let mut body = template_json("出处修改", "第二版内容 {{input}}");
+    body["source_url"] = serde_json::json!("https://Example.ORG/license");
+    let updated = app
+        .client
+        .put(&template_url)
+        .bearer_auth(&key)
+        .header("If-Match", format!("\"{id}-v1\""))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), 200);
+    let updated: serde_json::Value = updated.json().await.unwrap();
+    assert_eq!(updated["version"], 2);
+    assert_source_url(&updated, Some("https://example.org/license"), "更新响应");
+    let detail = get_json(&app, &format!("/v1/templates/{id}"), None).await;
+    assert_source_url(&detail, Some("https://example.org/license"), "更新后的详情");
+    assert_eq!(detail["version"], 2);
+
+    // 非法值：POST 与 PUT 都是 400，错误信息指出字段
+    let too_long = format!("https://example.com/{}", "a".repeat(281));
+    for bad in [
+        "http://example.com/",
+        "javascript:alert(1)",
+        "https://localhost/",
+        "https://127.0.0.1/",
+        "https://user:pw@example.com/",
+        "https://example.com/a b",
+        too_long.as_str(),
+    ] {
+        let mut body = template_json("非法出处", "内容 {{input}}");
+        body["source_url"] = serde_json::json!(bad);
+        for request in [
+            app.client.post(app.url("/v1/templates")),
+            app.client.put(&template_url),
+        ] {
+            let response = request.bearer_auth(&key).json(&body).send().await.unwrap();
+            assert_eq!(response.status(), 400, "{bad}");
+            let response: serde_json::Value = response.json().await.unwrap();
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("source_url"),
+                "错误信息应指出字段：{response}"
+            );
+        }
+    }
+    // 被拒绝的请求没有改动任何数据：没有新增模板，已有模板仍是第 2 版
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM templates")
+        .fetch_one(&app.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(total, 1);
+    let detail = get_json(&app, &format!("/v1/templates/{id}"), None).await;
+    assert_eq!(detail["version"], 2);
+    assert_source_url(
+        &detail,
+        Some("https://example.org/license"),
+        "被拒绝后的详情",
+    );
+
+    // PUT 不带 source_url：清空，version 再加 1
+    let cleared = app
+        .client
+        .put(&template_url)
+        .bearer_auth(&key)
+        .json(&template_json("出处修改", "第三版内容 {{input}}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), 200);
+    let cleared: serde_json::Value = cleared.json().await.unwrap();
+    assert_eq!(cleared["version"], 3);
+    assert_source_url(&cleared, None, "清空后的更新响应");
+    let detail = get_json(&app, &format!("/v1/templates/{id}"), None).await;
+    assert_source_url(&detail, None, "清空后的详情");
+    assert_eq!(stored_source_url(&app, &id).await, None);
+
+    // 空串同样视为未提供
+    let mut body = template_json("出处修改", "第四版内容 {{input}}");
+    body["source_url"] = serde_json::json!("   ");
+    let blank = app
+        .client
+        .put(&template_url)
+        .bearer_auth(&key)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blank.status(), 200);
+    let blank: serde_json::Value = blank.json().await.unwrap();
+    assert_eq!(blank["version"], 4);
+    assert_source_url(&blank, None, "空白值的更新响应");
+}
+
+/// 导入包里的 source_url 照常保存；某一条的值非法只让该条失败。
+#[tokio::test]
+async fn import_keeps_source_url_and_isolates_invalid_items() {
+    let Some(app) = app().await else { return };
+    let key = app
+        .create_key_direct("source-url-import@qq.com", &["read", "write"])
+        .await;
+
+    let mut with_source = template_json("导入带出处", "带出处的内容 {{input}}");
+    with_source["source_url"] =
+        serde_json::json!("https://AI.Google.DEV/gemini-api/docs/image-generation");
+    let mut bad_source = template_json("导入坏出处", "出处非法的内容 {{input}}");
+    bad_source["source_url"] = serde_json::json!("http://example.com/");
+    let response = app
+        .client
+        .post(app.url("/v1/templates/import"))
+        .bearer_auth(&key)
+        .json(&serde_json::json!({
+            "format": "gemini-image-templates",
+            "version": 1,
+            "templates": [
+                with_source,
+                bad_source,
+                template_json("导入无出处", "没有出处的内容 {{input}}"),
+            ],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let result: serde_json::Value = response.json().await.unwrap();
+    let results = result["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3, "{result}");
+    assert!(results[1].get("id").is_none(), "{result}");
+    assert!(
+        results[1]["error"].as_str().unwrap().contains("source_url"),
+        "错误信息应指出字段：{result}"
+    );
+
+    let first = results[0]["id"].as_str().expect("第一条应导入成功");
+    let third = results[2]["id"].as_str().expect("第三条应导入成功");
+    let detail = get_json(&app, &format!("/v1/templates/{first}"), None).await;
+    assert_source_url(&detail, Some(SOURCE_URL), "导入后的详情");
+    let detail = get_json(&app, &format!("/v1/templates/{third}"), None).await;
+    assert_source_url(&detail, None, "不带出处的导入详情");
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM templates")
+        .fetch_one(&app.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(total, 2, "非法的那一条不应入库");
+}
+
 /// 走真实的邮箱重置流程，重置后旧密钥失效，新密钥仍能修改、删除并在“我的模板”里看到。
 #[tokio::test]
 async fn ownership_survives_key_reset() {
@@ -1609,6 +1946,7 @@ async fn stale_version_update_is_rejected_by_the_database_guard() {
             reference: None,
             tags: None,
             author: None,
+            source_url: None,
             nsfw: None,
         })
         .unwrap()
@@ -1732,6 +2070,7 @@ async fn template_id_collision_retries_then_gives_up() {
         reference: None,
         tags: None,
         author: None,
+        source_url: None,
         nsfw: None,
     })
     .unwrap();

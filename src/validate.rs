@@ -10,6 +10,7 @@ const NAME_MAX: usize = 40;
 const DESCRIPTION_MAX: usize = 80;
 const CONTENT_MAX: usize = 8000;
 const AUTHOR_MAX: usize = 32;
+const SOURCE_URL_MAX: usize = 300;
 const TAG_COUNT_MAX: usize = 10;
 const TAG_LEN_MAX: usize = 20;
 
@@ -80,6 +81,7 @@ pub struct TemplateUpsert {
     pub reference: Option<String>,
     pub tags: Option<Vec<String>>,
     pub author: Option<String>,
+    pub source_url: Option<String>,
     #[allow(dead_code)]
     pub nsfw: Option<bool>,
 }
@@ -150,6 +152,8 @@ pub fn validate_upsert(input: &TemplateUpsert) -> Result<ValidatedTemplate, Stri
         None => None,
     };
 
+    let source_url = validate_source_url(input.source_url.as_deref())?;
+
     Ok(ValidatedTemplate {
         name,
         ai_description,
@@ -158,6 +162,7 @@ pub fn validate_upsert(input: &TemplateUpsert) -> Result<ValidatedTemplate, Stri
         reference,
         tags,
         author,
+        source_url,
     })
 }
 
@@ -170,6 +175,44 @@ pub struct ValidatedTemplate {
     pub reference: String,
     pub tags: Vec<String>,
     pub author: Option<String>,
+    pub source_url: Option<String>,
+}
+
+/// 出处链接校验：只收 https 的公开域名，不带账号口令。
+/// 空白与控制字符要在解析之前检查——url 解析器会静默吞掉制表符和换行。
+pub fn validate_source_url(input: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = input else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("source_url 不能包含空白或控制字符".to_string());
+    }
+    if trimmed.chars().count() > SOURCE_URL_MAX {
+        return Err(format!("source_url 不能超过 {SOURCE_URL_MAX} 字"));
+    }
+    let parsed =
+        url::Url::parse(trimmed).map_err(|_| "source_url 必须是 https 链接".to_string())?;
+    if parsed.scheme() != "https" {
+        return Err("source_url 必须是 https 链接".to_string());
+    }
+    match parsed.host() {
+        Some(url::Host::Domain(domain)) if domain.contains('.') => {}
+        // IP 字面量与单段主机名（如 localhost）都不是可展示的出处
+        _ => return Err("source_url 必须是公开域名".to_string()),
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("source_url 不能包含账号口令".to_string());
+    }
+    // 规范化（主机小写、punycode、百分号编码）后可能变长，重新检查长度
+    let normalized = parsed.as_str();
+    if normalized.chars().count() > SOURCE_URL_MAX {
+        return Err(format!("source_url 不能超过 {SOURCE_URL_MAX} 字"));
+    }
+    Ok(Some(normalized.to_string()))
 }
 
 /// defaults 只允许 `resolution` 与 `aspect_ratio` 两个键。
@@ -314,6 +357,7 @@ mod tests {
             reference: None,
             tags: None,
             author: None,
+            source_url: None,
             nsfw: None,
         }
     }
@@ -424,6 +468,138 @@ mod tests {
         assert!(validate_upsert(&input).is_err());
         input.nsfw = Some(false);
         assert!(validate_upsert(&input).is_ok());
+    }
+
+    #[test]
+    fn source_url_accepts_https_links_unchanged() {
+        for ok in [
+            "https://ai.google.dev/gemini-api/docs/image-generation",
+            "https://ai.google.dev/gemini-api/docs/image-generation?hl=zh-cn&x=1#prompting",
+            "https://creativecommons.org/licenses/by/4.0/",
+        ] {
+            assert_eq!(
+                validate_source_url(Some(ok)).unwrap().as_deref(),
+                Some(ok),
+                "{ok} 应原样保存"
+            );
+        }
+        // 恰好 300 字仍然合法
+        let exactly_300 = format!("https://example.com/{}", "a".repeat(280));
+        assert_eq!(exactly_300.chars().count(), 300);
+        assert_eq!(
+            validate_source_url(Some(&exactly_300)).unwrap().as_deref(),
+            Some(exactly_300.as_str())
+        );
+    }
+
+    #[test]
+    fn source_url_is_normalized_before_storing() {
+        for (input, expected) in [
+            // 主机名与 scheme 转小写，路径大小写保持不变
+            (
+                "https://AI.Google.DEV/Docs/Image",
+                "https://ai.google.dev/Docs/Image",
+            ),
+            ("HTTPS://Example.com/a", "https://example.com/a"),
+            // 补上根路径
+            ("https://example.com", "https://example.com/"),
+            // 两端空白去掉
+            ("  https://example.com/a \n", "https://example.com/a"),
+            // 中文域名转 punycode，路径做百分号编码
+            ("https://中文.中国/", "https://xn--fiq228c.xn--fiqs8s/"),
+            (
+                "https://example.com/路径",
+                "https://example.com/%E8%B7%AF%E5%BE%84",
+            ),
+        ] {
+            assert_eq!(
+                validate_source_url(Some(input)).unwrap().as_deref(),
+                Some(expected),
+                "{input:?} 的规范化结果不符"
+            );
+        }
+    }
+
+    #[test]
+    fn source_url_blank_means_not_provided() {
+        assert_eq!(validate_source_url(None), Ok(None));
+        for blank in ["", "   ", " \t\r\n ", "\u{3000}"] {
+            assert_eq!(
+                validate_source_url(Some(blank)),
+                Ok(None),
+                "{blank:?} 应视为未提供"
+            );
+        }
+    }
+
+    #[test]
+    fn source_url_rejects_unsafe_or_malformed_values() {
+        let scheme = "source_url 必须是 https 链接";
+        let host = "source_url 必须是公开域名";
+        let credentials = "source_url 不能包含账号口令";
+        let whitespace = "source_url 不能包含空白或控制字符";
+        let too_long = "source_url 不能超过 300 字";
+        // 输入只有 220 字，路径里的中文做百分号编码后远超 300
+        let expands_past_limit = format!("https://example.com/{}", "字".repeat(200));
+        assert!(expands_past_limit.chars().count() <= 300);
+        let over_limit = format!("https://example.com/{}", "a".repeat(281));
+        assert_eq!(over_limit.chars().count(), 301);
+
+        let cases: Vec<(&str, &str)> = vec![
+            ("http://example.com/", scheme),
+            ("javascript:alert(1)", scheme),
+            ("data:text/html,x", scheme),
+            ("ftp://example.com/", scheme),
+            ("file:///etc/passwd", scheme),
+            ("//example.com", scheme),
+            ("example.com", scheme),
+            ("https://", scheme),
+            // 单段主机名、IP 字面量（含解析器会折算成 IPv4 的十进制与十六进制写法）
+            ("https://localhost/", host),
+            ("https://intranet/", host),
+            ("https://127.0.0.1/", host),
+            ("https://[::1]/", host),
+            ("https://2130706433/", host),
+            ("https://0x7f.1/", host),
+            ("https://user:pw@example.com/", credentials),
+            ("https://user@example.com/", credentials),
+            ("https://:pw@example.com/", credentials),
+            // 制表符与换行会被 url 解析器静默吞掉，必须在解析前拦下
+            ("https://exa mple.com/", whitespace),
+            ("https://example.com/a b", whitespace),
+            ("https://exa\tmple.com/", whitespace),
+            ("https://example.com/a\nb", whitespace),
+            ("https://example.com/a\rb", whitespace),
+            ("https://example.com/a\u{3000}b", whitespace),
+            ("https://example.com/a\u{0}b", whitespace),
+            ("https://example.com/a\u{7f}b", whitespace),
+            (over_limit.as_str(), too_long),
+            (expands_past_limit.as_str(), too_long),
+        ];
+        for (input, expected) in cases {
+            let error = validate_source_url(Some(input)).expect_err(&format!("{input:?} 应被拒绝"));
+            assert_eq!(error, expected, "{input:?} 的错误信息不符");
+            assert!(!error.contains(input), "错误信息不应回显用户输入：{error}");
+        }
+    }
+
+    #[test]
+    fn source_url_flows_through_validate_upsert() {
+        let mut input = upsert("n", "c");
+        assert_eq!(validate_upsert(&input).unwrap().source_url, None);
+
+        input.source_url = Some(" HTTPS://AI.Google.DEV/docs ".to_string());
+        assert_eq!(
+            validate_upsert(&input).unwrap().source_url.as_deref(),
+            Some("https://ai.google.dev/docs")
+        );
+
+        input.source_url = Some("   ".to_string());
+        assert_eq!(validate_upsert(&input).unwrap().source_url, None);
+
+        input.source_url = Some("http://example.com/".to_string());
+        let error = validate_upsert(&input).unwrap_err();
+        assert!(error.contains("source_url"), "{error}");
     }
 
     #[test]

@@ -10,6 +10,8 @@
 - content 只允许 {{input}}、{{rows}}、{{cols}} 三种占位符，其他 {{...}} 一律拒绝。
 - defaults：{"resolution": "2K", "aspect_ratio": "16:9"}（可选，值须匹配对应格式）。
 - reference：none / optional / required，缺省 none；tags：最多 10 个，每个 1-20 字。
+- source_url：可选，出处或许可页面的 https 链接，≤300 字，不能带账号口令，IP 与单段主机名会被拒绝，
+  保存规范化后的链接；没有时响应里不出现这个键；PUT 修改时不带则清空。
 - 不接受 nsfw 内容与图片字段。
 
 ## 公开接口（不需要密钥）

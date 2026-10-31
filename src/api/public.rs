@@ -17,10 +17,10 @@ use crate::search::SEARCH_OFFSET_LIMIT;
 use crate::state::AppState;
 use crate::validate::has_forbidden_control;
 
-const SEL_PUBLISHED_BY_IDS: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' AND id = ANY($1)";
-const SEL_PUBLISHED_BY_ID: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE id = $1 AND status = 'published'";
-const SEL_PUBLISHED_TAG_CURSOR: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' AND $1 = ANY(tags) AND (updated_at, id) < (COALESCE($2::timestamptz, 'infinity'), COALESCE($3::text, '')) ORDER BY updated_at DESC, id DESC LIMIT $4";
-const SEL_PUBLISHED_CURSOR: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' AND (updated_at, id) < (COALESCE($1::timestamptz, 'infinity'), COALESCE($2::text, '')) ORDER BY updated_at DESC, id DESC LIMIT $3";
+const SEL_PUBLISHED_BY_IDS: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' AND id = ANY($1)";
+const SEL_PUBLISHED_BY_ID: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE id = $1 AND status = 'published'";
+const SEL_PUBLISHED_TAG_CURSOR: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' AND $1 = ANY(tags) AND (updated_at, id) < (COALESCE($2::timestamptz, 'infinity'), COALESCE($3::text, '')) ORDER BY updated_at DESC, id DESC LIMIT $4";
+const SEL_PUBLISHED_CURSOR: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' AND (updated_at, id) < (COALESCE($1::timestamptz, 'infinity'), COALESCE($2::text, '')) ORDER BY updated_at DESC, id DESC LIMIT $3";
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct ListParams {

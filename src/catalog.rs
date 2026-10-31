@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, Notify};
 use crate::error::ApiError;
 use crate::models::{TemplateJson, TemplatePackage, TemplateRow, PACKAGE_FORMAT, PACKAGE_VERSION};
 
-const SEL_ALL_PUBLISHED_ORDERED: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' ORDER BY id";
+const SEL_ALL_PUBLISHED_ORDERED: &str = "SELECT id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac, status, version, created_at, updated_at FROM templates WHERE status = 'published' ORDER BY id";
 
 /// 生成失败后重试前的等待时间，避免数据库故障时空转。
 const RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -228,6 +228,7 @@ mod tests {
             reference: "none".to_string(),
             tags: vec!["标签".to_string()],
             author: None,
+            source_url: None,
             owner_key_id: Uuid::new_v4(),
             owner_email_hmac: "hmac-test".to_string(),
             status: "published".to_string(),
@@ -287,7 +288,11 @@ mod tests {
     fn field_order_fixed_in_json() {
         // serde_json::Value 会按字母排序键，这里用序列化字节验证字段顺序
         let t = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
-        let json = serde_json::to_string(&build_package(&[row("a", t)])).unwrap();
+        let mut full = row("a", t);
+        full.author = Some("作者".to_string());
+        full.source_url =
+            Some("https://ai.google.dev/gemini-api/docs/image-generation".to_string());
+        let json = serde_json::to_string(&build_package(&[full])).unwrap();
         // 只检查模板对象内部的字段顺序（包级别也有 version/updated_at）
         let json = &json[json.find("\"templates\":").expect("缺少 templates")..];
         let order = [
@@ -298,6 +303,8 @@ mod tests {
             "defaults",
             "reference",
             "tags",
+            "author",
+            "source_url",
             "version",
             "created_at",
             "updated_at",
@@ -311,6 +318,25 @@ mod tests {
             assert!(pos > last, "字段 {key} 顺序错误：{json}");
             last = pos;
         }
+    }
+
+    /// 没有 source_url 的模板序列化结果与加这个字段之前逐字节相同，
+    /// 线上已有模板的目录哈希不会因为升级而变化。
+    #[test]
+    fn absent_source_url_is_omitted_from_json() {
+        let t = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        let plain = serde_json::to_string(&TemplateJson::from(row("a", t))).unwrap();
+        assert_eq!(
+            plain,
+            r#"{"id":"a","name":"模板a","ai_description":"说明","content":"内容 {{input}}","defaults":{},"reference":"none","tags":["标签"],"version":1,"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}"#
+        );
+
+        // 有署名而没有出处链接时，也不出现这个键
+        let mut with_author = row("a", t);
+        with_author.author = Some("作者".to_string());
+        let json = serde_json::to_string(&build_package(&[with_author])).unwrap();
+        assert!(json.contains("\"author\":\"作者\""), "{json}");
+        assert!(!json.contains("source_url"), "{json}");
     }
 
     #[tokio::test]

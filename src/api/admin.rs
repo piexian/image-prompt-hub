@@ -17,7 +17,7 @@ use crate::search::IndexOp;
 use crate::state::AppState;
 use crate::validate::has_forbidden_control;
 
-const UPD_TEMPLATE_STATUS: &str = "UPDATE templates SET status = $2, updated_at = now() WHERE id = $1 AND status = ANY($3) RETURNING id, name, ai_description, content, defaults, reference, tags, author, owner_key_id, owner_email_hmac, status, version, created_at, updated_at";
+const UPD_TEMPLATE_STATUS: &str = "UPDATE templates SET status = $2, updated_at = now() WHERE id = $1 AND status = ANY($3) RETURNING id, name, ai_description, content, defaults, reference, tags, author, source_url, owner_key_id, owner_email_hmac, status, version, created_at, updated_at";
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct ReportsParams {
