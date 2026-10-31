@@ -592,34 +592,42 @@ pub async fn request_key(
     if banned {
         tracing::info!("封禁邮箱申请密钥：静默返回 202，不发信");
     } else {
+        // 发信放后台：响应耗时不依赖 SMTP 速度，被封禁与正常申请的返回时间一致
         let link = format!(
             "{}/v1/keys/verify?token={}",
             state.config.public_base_url, token
         );
         let verification_mail = templates::verification_email(purpose, &link);
-        let send_result = state
-            .mailer
-            .send(
-                &email,
-                VERIFICATION_SUBJECT,
-                &verification_mail.text,
-                &verification_mail.html,
-            )
-            .await;
-        match send_result {
-            Ok(()) => {
-                // 邮件已发出，计数失败只记日志
-                if let Err(error) =
-                    increment_email_daily_count(&state.pool, state.config.email_daily_limit).await
-                {
-                    tracing::error!(error = ?error, "发信计数更新失败");
+        let task_state = state.clone();
+        let task_email = email.clone();
+        state.mail_tasks.spawn(async move {
+            let send_result = task_state
+                .mailer
+                .send(
+                    &task_email,
+                    VERIFICATION_SUBJECT,
+                    &verification_mail.text,
+                    &verification_mail.html,
+                )
+                .await;
+            match send_result {
+                Ok(()) => {
+                    // 邮件已发出，计数失败只记日志
+                    if let Err(error) = increment_email_daily_count(
+                        &task_state.pool,
+                        task_state.config.email_daily_limit,
+                    )
+                    .await
+                    {
+                        tracing::error!(error = ?error, "发信计数更新失败");
+                    }
+                }
+                Err(error) => {
+                    // 不向外暴露发信失败细节；记录保留以维持冷却时间
+                    tracing::error!(error = %redact_emails(&error), "验证邮件发送失败");
                 }
             }
-            Err(error) => {
-                // 不向外暴露发信失败细节；记录保留以维持冷却时间
-                tracing::error!(error = %redact_emails(&error), "验证邮件发送失败");
-            }
-        }
+        });
     }
 
     Ok((

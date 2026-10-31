@@ -156,6 +156,13 @@ async fn serve(config: Config) -> Result<(), ApiError> {
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| ApiError::internal_with(format!("服务运行失败：{e}")))?;
+
+    // 服务停止后等待后台发信任务收尾（最多 10 秒），避免退出截断发信
+    state.mail_tasks.close();
+    match tokio::time::timeout(std::time::Duration::from_secs(10), state.mail_tasks.wait()).await {
+        Ok(()) => tracing::info!("后台发信任务已全部结束"),
+        Err(_) => tracing::warn!("等待后台发信任务超时（10 秒），强制退出"),
+    }
     Ok(())
 }
 

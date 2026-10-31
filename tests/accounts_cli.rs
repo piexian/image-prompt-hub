@@ -128,6 +128,7 @@ async fn cli_create_key_ban_and_unban_roundtrip() {
         .await;
     assert!(!refused.success);
     assert!(refused.stderr.contains("封禁"), "{}", refused.stderr);
+    app.wait_mail_tasks().await;
     let mails_before = app.mailer.mails().await.len();
     assert_eq!(app.request_key("cli.user@qq.com").await.status(), 202);
     assert_eq!(

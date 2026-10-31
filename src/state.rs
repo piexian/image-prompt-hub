@@ -21,6 +21,8 @@ pub struct AppStateInner {
     pub limits: RateLimiters,
     pub mailer: Arc<dyn Mailer>,
     pub cipher: EmailCipher,
+    /// 跟踪后台发信任务：申请接口发信放后台，退出前等待收尾。
+    pub mail_tasks: tokio_util::task::TaskTracker,
 }
 
 #[derive(Clone)]
@@ -76,6 +78,7 @@ pub async fn build_state(config: Config, mailer: Arc<dyn Mailer>) -> Result<AppS
         limits,
         mailer,
         cipher,
+        mail_tasks: tokio_util::task::TaskTracker::new(),
     })))
 }
 

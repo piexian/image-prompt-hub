@@ -163,8 +163,9 @@ impl TestApp {
         format!("{}{path}", self.base_url)
     }
 
-    /// 从假发信器里取最新一封验证邮件并抽出令牌。
+    /// 从假发信器里取最新一封验证邮件并抽出令牌（先等后台发信完成）。
     pub async fn latest_verification_token(&self) -> String {
+        self.wait_mail_tasks().await;
         let mails = self.mailer.mails().await;
         let mail = mails
             .iter()
@@ -180,8 +181,9 @@ impl TestApp {
             .to_string()
     }
 
-    /// 从假发信器里取最新一封密钥邮件并抽出密钥。
+    /// 从假发信器里取最新一封密钥邮件并抽出密钥（先等后台发信完成）。
     pub async fn latest_api_key(&self) -> String {
+        self.wait_mail_tasks().await;
         let mails = self.mailer.mails().await;
         let mail = mails
             .iter()
@@ -287,8 +289,9 @@ impl TestApp {
         }
     }
 
-    /// 从最新一封密钥邮件里提取吊销链接。
+    /// 从最新一封密钥邮件里提取吊销链接（先等后台发信完成）。
     pub async fn latest_revoke_link(&self) -> String {
+        self.wait_mail_tasks().await;
         let mails = self.mailer.mails().await;
         let mail = mails
             .iter()
@@ -306,6 +309,19 @@ impl TestApp {
             .next()
             .expect("吊销链接为空")
             .to_string()
+    }
+
+    /// 等待后台发信任务排空（发信是异步的，断言邮件前先等它完成）。
+    /// close → wait → reopen：既等待全部在飞任务，也不影响后续请求继续投递。
+    pub async fn wait_mail_tasks(&self) {
+        self.state.mail_tasks.close();
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.state.mail_tasks.wait(),
+        )
+        .await;
+        self.state.mail_tasks.reopen();
+        assert!(waited.is_ok(), "等待后台发信任务超时");
     }
 
     /// 把该邮箱最近的验证记录时间整体前移，绕过冷却窗口（代替睡眠等待）。

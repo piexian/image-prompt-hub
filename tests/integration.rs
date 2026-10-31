@@ -31,6 +31,7 @@ async fn full_key_request_flow() {
     let body: serde_json::Value = response.json().await.unwrap();
     assert!(body["error"].is_null());
 
+    app.wait_mail_tasks().await;
     let mails = app.mailer.mails().await;
     assert_eq!(mails.len(), 1);
     assert_eq!(mails[0].to, "user@qq.com", "邮箱应已规范化");
@@ -149,6 +150,7 @@ async fn reset_revokes_old_key_and_failed_send_is_retryable() {
         .await
         .unwrap();
     assert_eq!(response.status(), 202);
+    app.wait_mail_tasks().await;
     let mails = app.mailer.mails().await;
     let verify_mail = mails
         .iter()
@@ -286,6 +288,7 @@ async fn concurrent_confirm_of_two_links_keeps_single_active_key() {
             .unwrap();
         assert_eq!(response.status(), 202);
     }
+    app.wait_mail_tasks().await;
     let mails = app.mailer.mails().await;
     let tokens: Vec<String> = mails
         .iter()
@@ -518,6 +521,7 @@ async fn request_response_identical_for_existing_and_new_email() {
         .await
         .unwrap();
     assert_eq!(variant.status(), 202);
+    app.wait_mail_tasks().await;
     let mails = app.mailer.mails().await;
     let verify = mails
         .iter()
@@ -1172,6 +1176,7 @@ async fn ban_and_unban_account() {
         assert_eq!(response.status(), 202);
         response.text().await.unwrap()
     };
+    app.wait_mail_tasks().await;
     let mails_before = app.mailer.mails().await.len();
     app.backdate_verifications("banned@qq.com").await;
     let response = app.request_key("banned@qq.com").await;

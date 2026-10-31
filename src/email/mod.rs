@@ -43,11 +43,13 @@ impl Mailer for DisabledMailer {
     }
 }
 
-/// 测试与本地调试用：把邮件记在内存里，可切换为发送失败。
+/// 测试与本地调试用：把邮件记在内存里，可切换为发送失败、可配置人为延迟。
 #[derive(Clone)]
 pub struct FakeMailer {
     pub sent: std::sync::Arc<AsyncMutex<Vec<SentMail>>>,
     pub fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 人为延迟毫秒数（0 为不延迟），用于验证发信在后台执行。
+    pub delay_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl FakeMailer {
@@ -55,11 +57,16 @@ impl FakeMailer {
         Self {
             sent: std::sync::Arc::new(AsyncMutex::new(Vec::new())),
             fail: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            delay_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
     pub fn set_fail(&self, fail: bool) {
         self.fail.store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn set_delay_ms(&self, ms: u64) {
+        self.delay_ms.store(ms, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub async fn mails(&self) -> Vec<SentMail> {
@@ -76,6 +83,10 @@ impl Default for FakeMailer {
 #[async_trait]
 impl Mailer for FakeMailer {
     async fn send(&self, to: &str, subject: &str, text: &str, html: &str) -> Result<(), String> {
+        let delay = self.delay_ms.load(std::sync::atomic::Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
         if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
             return Err("测试模拟的发送失败".to_string());
         }
