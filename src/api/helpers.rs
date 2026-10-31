@@ -44,12 +44,20 @@ impl FromRequestParts<AppState> for RequestContext {
 
         let key = match bearer_token(&parts.headers) {
             Some(token) => {
-                // 查库前先按 IP 扣减认证尝试配额，无效密钥的请求不能绕过限流
-                state.limits.check_auth_attempt(&ip_hash)?;
-                let row =
-                    crate::auth::authenticate(&state.pool, &state.config.key_hash(&token)).await?;
-                touch_last_used(&state.pool, row.id, row.last_used_at).await;
-                Some(row)
+                // 查库前只读检查认证失败窗口：无效密钥洪泛在此被挡下，不查库
+                state.limits.check_auth_failure(&ip_hash)?;
+                match crate::auth::authenticate(&state.pool, &state.config.key_hash(&token)).await {
+                    Ok(row) => {
+                        touch_last_used(&state.pool, row.id, row.last_used_at).await;
+                        Some(row)
+                    }
+                    // 认证失败（401）才计数；其他错误（如数据库故障）不计
+                    Err(error) if error.code == crate::error::ErrorCode::Unauthorized => {
+                        state.limits.record_auth_failure(&ip_hash);
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             None => None,
         };

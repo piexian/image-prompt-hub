@@ -97,7 +97,7 @@ pub struct RateLimitConfig {
     pub key_request_per_hour: u32,
     pub key_verify_per_hour: u32,
     pub report_per_hour: u32,
-    pub auth_attempt_per_min: u32,
+    pub auth_failure_per_min: u32,
 }
 
 impl Default for RateLimitConfig {
@@ -109,7 +109,7 @@ impl Default for RateLimitConfig {
             key_request_per_hour: 5,
             key_verify_per_hour: 20,
             report_per_hour: 10,
-            auth_attempt_per_min: 120,
+            auth_failure_per_min: 30,
         }
     }
 }
@@ -425,10 +425,10 @@ impl Config {
                 defaults.report_per_hour,
                 1,
             )?,
-            auth_attempt_per_min: env_parse(
+            auth_failure_per_min: env_parse(
                 lookup,
-                "RATE_AUTH_ATTEMPT_PER_MIN",
-                defaults.auth_attempt_per_min,
+                "RATE_AUTH_FAILURE_PER_MIN",
+                defaults.auth_failure_per_min,
                 1,
             )?,
         };
@@ -802,21 +802,21 @@ mod tests {
         let defaults = load(&env).unwrap();
         assert_eq!(defaults.account_create_per_hour, 100);
         assert_eq!(defaults.account_template_limit, 1000);
-        assert_eq!(defaults.rate_limits.auth_attempt_per_min, 120);
+        assert_eq!(defaults.rate_limits.auth_failure_per_min, 30);
 
         let tuned = {
             let env = with(&env, "ACCOUNT_CREATE_PER_HOUR", "7");
             let env = with(&env, "ACCOUNT_TEMPLATE_LIMIT", "33");
-            load(&with(&env, "RATE_AUTH_ATTEMPT_PER_MIN", "9")).unwrap()
+            load(&with(&env, "RATE_AUTH_FAILURE_PER_MIN", "9")).unwrap()
         };
         assert_eq!(tuned.account_create_per_hour, 7);
         assert_eq!(tuned.account_template_limit, 33);
-        assert_eq!(tuned.rate_limits.auth_attempt_per_min, 9);
+        assert_eq!(tuned.rate_limits.auth_failure_per_min, 9);
 
         assert!(load(&with(&env, "ACCOUNT_CREATE_PER_HOUR", "0")).is_err());
         assert!(load(&with(&env, "ACCOUNT_TEMPLATE_LIMIT", "-1")).is_err());
         assert!(load(&with(&env, "ACCOUNT_TEMPLATE_LIMIT", "many")).is_err());
-        assert!(load(&with(&env, "RATE_AUTH_ATTEMPT_PER_MIN", "0")).is_err());
+        assert!(load(&with(&env, "RATE_AUTH_FAILURE_PER_MIN", "0")).is_err());
     }
 
     /// 样例配置照抄不能启动（密钥项留空），补上密钥后其余取值都合法。

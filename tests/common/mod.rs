@@ -152,7 +152,7 @@ fn test_config(database_url: &str, data_dir: &std::path::Path) -> Config {
             key_request_per_hour: generous,
             key_verify_per_hour: generous,
             report_per_hour: generous,
-            auth_attempt_per_min: generous,
+            auth_failure_per_min: generous,
         },
         ..Config::default()
     }

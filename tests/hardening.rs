@@ -67,20 +67,27 @@ async fn key_info_counts_against_keyed_read_limit() {
     assert_eq!(body["error"]["code"], "rate_limited");
 }
 
-/// 匿名请求不消耗认证尝试额度；带 Bearer 的请求（无论密钥有效与否）都在查库前扣减。
+/// 认证失败窗口只统计 401：匿名与有效密钥的请求不消耗额度；
+/// 无效密钥达到上限后，该 IP 的所有带 Bearer 请求（包括有效密钥）都被拒。
 #[tokio::test]
-async fn auth_attempts_are_charged_only_for_bearer_requests() {
-    let Some(app) = app_with(|config| config.rate_limits.auth_attempt_per_min = 3).await else {
+async fn auth_failure_window_counts_only_failures() {
+    let Some(app) = app_with(|config| {
+        config.rate_limits.auth_failure_per_min = 3;
+        config.trust_cf_connecting_ip = true;
+    })
+    .await
+    else {
         return;
     };
     let key = app.create_key_direct("auth@qq.com", &["read"]).await;
 
+    // 匿名请求不经过认证窗口
     for _ in 0..6 {
         let response = app.client.get(app.url("/v1/status")).send().await.unwrap();
-        assert_eq!(response.status(), 200, "匿名请求不应消耗认证尝试额度");
+        assert_eq!(response.status(), 200, "匿名请求不应受认证失败窗口影响");
     }
-    let mut statuses = Vec::new();
-    for _ in 0..5 {
+    // 有效密钥请求再多也不扣减额度
+    for _ in 0..10 {
         let response = app
             .client
             .get(app.url("/v1/key"))
@@ -88,24 +95,50 @@ async fn auth_attempts_are_charged_only_for_bearer_requests() {
             .send()
             .await
             .unwrap();
-        statuses.push(response.status().as_u16());
+        assert_eq!(response.status(), 200, "有效密钥不应消耗失败额度");
     }
-    assert_eq!(
-        statuses,
-        [200, 200, 200, 429, 429],
-        "有效密钥的请求同样占用额度"
-    );
 
-    // 被限流之后随机密钥也不会再查库：同样 429，而不是 401
-    let random = app
+    // 无效密钥 3 次 401 达到上限
+    for _ in 0..3 {
+        let response = app
+            .client
+            .get(app.url("/v1/key"))
+            .bearer_auth("iph_invalid")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+    }
+    // 第 4 次（无论密钥有效与否）在查库前直接 429
+    let blocked = app
         .client
         .get(app.url("/v1/key"))
-        .bearer_auth("iph_random")
+        .bearer_auth("iph_invalid")
         .send()
         .await
         .unwrap();
-    assert_eq!(random.status(), 429);
-    assert!(random.headers().contains_key("retry-after"));
+    assert_eq!(blocked.status(), 429);
+    assert!(blocked.headers().contains_key("retry-after"));
+    // 取舍：超限后同 IP 的有效密钥也被拒（挡洪泛优先）
+    let valid_blocked = app
+        .client
+        .get(app.url("/v1/key"))
+        .bearer_auth(&key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(valid_blocked.status(), 429, "同 IP 连坐是文档化的取舍");
+
+    // 不同 IP 互不影响（借 CF-Connecting-IP 区分）
+    let other = app
+        .client
+        .get(app.url("/v1/key"))
+        .bearer_auth(&key)
+        .header("cf-connecting-ip", "203.0.113.99")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other.status(), 200, "不同 IP 不应受影响");
 }
 
 /// 同一 /64 网段内轮换 IPv6 地址共享限额；不同网段互不影响。
@@ -675,7 +708,7 @@ async fn status_describes_all_public_limits() {
         "key_request_per_hour_per_ip",
         "key_verify_per_hour_per_ip",
         "report_per_hour_per_ip",
-        "auth_attempt_per_minute_per_ip",
+        "auth_failure_per_minute_per_ip",
         "account_create_per_hour",
         "account_template_limit",
     ] {

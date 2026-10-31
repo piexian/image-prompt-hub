@@ -1294,11 +1294,11 @@ async fn admin_keys_lookup_by_key_id() {
     );
 }
 
-/// 无效密钥的请求消耗认证尝试配额。
+/// 无效密钥的连续 401 触发认证失败限流，429 带 Retry-After。
 #[tokio::test]
-async fn auth_attempt_rate_limit_for_invalid_keys() {
+async fn invalid_keys_trigger_auth_failure_rate_limit() {
     let Some(app) = app_with(|config| {
-        config.rate_limits.auth_attempt_per_min = 5;
+        config.rate_limits.auth_failure_per_min = 5;
     })
     .await
     else {
@@ -1317,6 +1317,9 @@ async fn auth_attempt_rate_limit_for_invalid_keys() {
         match response.status().as_u16() {
             401 => {}
             429 => {
+                assert!(response.headers().contains_key("retry-after"));
+                let body: serde_json::Value = response.json().await.unwrap();
+                assert_eq!(body["error"]["code"], "rate_limited");
                 got_429 = true;
                 break;
             }
@@ -1332,7 +1335,7 @@ async fn invalid_cf_header_falls_back_to_socket_addr() {
     let Some(app) = app_with(|config| {
         config.trust_cf_connecting_ip = true;
         config.rate_limits.anon_read_per_min = 3;
-        config.rate_limits.auth_attempt_per_min = 1000;
+        config.rate_limits.auth_failure_per_min = 1000;
     })
     .await
     else {

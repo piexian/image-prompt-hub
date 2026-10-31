@@ -89,7 +89,7 @@ image-prompt-hub admin unban --email <邮箱>
 | `RATE_KEY_REQUEST_PER_HOUR` | `5` | 申请密钥限流（每 IP） |
 | `RATE_KEY_VERIFY_PER_HOUR` | `20` | 验证确认限流（每 IP） |
 | `RATE_REPORT_PER_HOUR` | `10` | 举报限流（每 IP） |
-| `RATE_AUTH_ATTEMPT_PER_MIN` | `120` | 带 Bearer 请求的认证尝试限流（每 IP，查库前扣减，无效密钥也消耗额度） |
+| `RATE_AUTH_FAILURE_PER_MIN` | `30` | 认证失败限流（每 IP 固定窗口，只统计 401，查库前拦截） |
 | `LOG_FORMAT` | `pretty` | `pretty` / `json` |
 
 IPv6 客户端按 /64 网段作为限流键与 IP 哈希的输入（IPv4 按完整地址，IPv4 映射地址按其 IPv4 计），避免在一个网段内轮换地址绕过限流。限流状态在进程内存里，后台每 5 分钟清理已恢复满额度的键。
@@ -128,7 +128,7 @@ docker stop iph-test-pg
 - 邮箱身份做了规范化（gmail.com 去掉本地部分的点和 `+` 后缀，其他域名去掉 `+` 后缀），同一邮箱的变体地址共享密钥、限频与封禁状态。
 - 密钥确认流程不在数据库事务里发信：先占用验证记录并登记 `pending_delivery` 密钥并提交，发信成功后再按邮箱身份加咨询锁、吊销旧密钥并激活新密钥；发信失败则删除 pending 密钥并恢复验证记录，链接可以重试。后台清理会删除卡住超过 1 小时的 pending 密钥。确认流程在独立任务里执行，请求超时或客户端断开不会让它停在半途。
 - 模板归属绑定账号身份（`owner_email_hmac`），不绑定密钥 ID；`owner_key_id` 只记录上传时用的密钥。
-- 带 Bearer 的请求在查库前先按客户端 IP 扣一次认证尝试额度，随机密钥的请求不能绕过限流去反复查库。
+- 认证失败限流只统计 401（固定窗口，每 IP 每分钟默认 30 次）：达到上限后，该 IP 的所有带 Bearer 请求（包括携带有效密钥的）在窗口内都会在查库之前被直接拒绝——这是为了挡住无效密钥洪泛而接受的一定误伤，正常使用不会触发；认证成功不消耗任何额度。
 - 所有响应默认 `Cache-Control: no-store`；只有明确公开的只读接口的成功响应（200/304）允许共享缓存（目录快照 `public, max-age=300`，其余公开读接口 `public, max-age=60`）；带 `Authorization` 头的请求一律 `private, no-store`，错误响应与写操作永不缓存。
 - SMTP 与插件市场的映射不同：`starttls` 与 `auto`（非 465 端口）使用必需 STARTTLS，服务器不提供时拒绝发送，账号密码不会以明文外泄；`auto` 的 465 端口与 `ssl_tls` 使用隐式 TLS；只有显式配置 `none` 才会明文连接。
 - 发信失败的错误信息写日志前会脱敏邮箱地址，日志里没有密钥、验证令牌、邮箱明文和 IP 明文。

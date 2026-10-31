@@ -360,7 +360,7 @@ pub async fn status(
         "key_request_per_hour_per_ip": config.rate_limits.key_request_per_hour,
         "key_verify_per_hour_per_ip": config.rate_limits.key_verify_per_hour,
         "report_per_hour_per_ip": config.rate_limits.report_per_hour,
-        "auth_attempt_per_minute_per_ip": config.rate_limits.auth_attempt_per_min,
+        "auth_failure_per_minute_per_ip": config.rate_limits.auth_failure_per_min,
         "account_create_per_hour": config.account_create_per_hour,
         "account_template_limit": config.account_template_limit,
     });
