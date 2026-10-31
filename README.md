@@ -10,6 +10,7 @@ AstrBot 图片生成插件（`gemini image generation`）配套的在线提示�
 - 写接口：上传、批量导入、修改（If-Match 乐观并发）、删除，仅限本人或 admin。模板归属绑定账号（邮箱身份），重置密钥不会丢失自己的模板；每个账号有每小时新建条数与模板总数两项额度。
 - 管理：举报列表、模板下架与恢复、按邮箱查密钥（`POST /v1/admin/keys/lookup`，邮箱不进 URL）、吊销密钥、账号封禁与解封（吊销全部密钥，可同时隐藏其全部模板）。
 - 接口文档：`GET /openapi.json`（OpenAPI 3.1，utoipa 生成）与 `GET /llms.txt`（给 AI 看的说明）。
+- 状态页：`/status` 给浏览器（HTML）；程序读取用 `/v1/status`（JSON，不受页面影响）。
 
 ## 本地运行
 
@@ -215,7 +216,7 @@ iph-admin admin revoke-key --key-id <uuid>
 
 ## 邮件预览
 
-`cargo run --example preview` 把申请、重置、密钥三种邮件的 HTML 与纯文本写到 `target/preview/emails/`，浏览器打开 `.html` 查看效果。
+`cargo run --example preview` 把申请、重置、密钥三种邮件的 HTML 与纯文本写到 `target/preview/emails/`，浏览器打开 `.html` 查看效果。同一命令也会输出页面样例。
 
 ## 测试
 

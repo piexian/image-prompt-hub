@@ -23,6 +23,7 @@ use crate::state::AppState;
         public::get_template,
         public::list_tags,
         public::status,
+        public::status_page,
         public::catalog_version,
         public::catalog,
         public::report_template,

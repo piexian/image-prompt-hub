@@ -1,10 +1,40 @@
-//! 开发用预览：把三种邮件与全部确认类页面的 HTML 写到 target/preview/，
+//! 开发用预览：把三种邮件与页面样例的 HTML 写到 target/preview/，
 //! 在浏览器里直接打开 .html 查看效果。不进正式二进制。
 
+use image_prompt_hub::api::public::StatusResponse;
+use image_prompt_hub::catalog::CatalogMeta;
 use image_prompt_hub::email::templates::{api_key_email, verification_email, EmailContent};
-use image_prompt_hub::pages::{page, PageKind};
+use image_prompt_hub::pages::{page, status_page, PageKind};
 
 const BASE: &str = "https://hub.example.com";
+
+fn sample_status(with_catalog: bool) -> StatusResponse {
+    let generated_at = chrono::DateTime::parse_from_rfc3339("2026-10-31T14:13:09Z")
+        .expect("样例时间可解析")
+        .with_timezone(&chrono::Utc);
+    StatusResponse {
+        version: "0.1.0".to_string(),
+        template_count: 30,
+        catalog: with_catalog.then(|| CatalogMeta {
+            hash: "7be5040b6c82f1349f8a71f2aae9db776dd828da60d2cbc4f595d0bf8161ebe4".to_string(),
+            count: 30,
+            updated_at: "2026-10-31T14:13:09Z".to_string(),
+            size: 7874,
+        }),
+        rate_limits: serde_json::json!({
+            "anonymous_read_per_minute_per_ip": 60,
+            "keyed_read_per_minute_per_key": 600,
+            "write_per_minute_per_key": 60,
+            "key_request_per_hour_per_ip": 5,
+            "key_verify_per_hour_per_ip": 20,
+            "report_per_hour_per_ip": 10,
+            "auth_failure_per_minute_per_ip": 30,
+            "account_create_per_hour": 100,
+            "account_template_limit": 1000,
+        }),
+        generated_at,
+    }
+}
 
 fn main() {
     let dir = std::path::Path::new("target/preview/emails");
@@ -43,7 +73,7 @@ fn main() {
     }
     println!("在浏览器中打开 target/preview/emails/*.html 查看效果");
 
-    // 页面预览：每种类别各一页 + 根路径导航页
+    // 页面预览：确认页、导航页，以及状态页的有快照 / 无快照两种
     let page_dir = std::path::Path::new("target/preview/pages");
     std::fs::create_dir_all(page_dir).expect("创建页面预览目录失败");
     let verify_form = "<p>你正在为这个邮箱申请 API 密钥。</p>\
@@ -57,7 +87,7 @@ fn main() {
         <form method=\"post\" action=\"/v1/keys/revoke\">\
         <input type=\"hidden\" name=\"token\" value=\"example-token\">\
         <button type=\"submit\">确认吊销</button></form>";
-    let pages: [(&str, String); 8] = [
+    let pages: [(&str, String); 10] = [
         ("verify-confirm", page(PageKind::Confirm, "确认操作", "确认申请密钥", verify_form)),
         ("revoke-confirm", page(PageKind::Confirm, "确认吊销", "确认吊销密钥", revoke_form)),
         (
@@ -90,11 +120,19 @@ fn main() {
                  <div class=\"btn-grid\">\
                  <a class=\"btn\" href=\"/llms.txt\">接口说明（llms.txt）</a>\
                  <a class=\"btn-secondary\" href=\"/openapi.json\">OpenAPI 文档</a>\
-                 <a class=\"btn-secondary\" href=\"/v1/status\">服务状态</a>\
+                 <a class=\"btn-secondary\" href=\"/status\">服务状态</a>\
                  <a class=\"btn-secondary\" href=\"/v1/catalog/version\">目录快照版本</a>\
                  </div>\
                  <p class=\"muted\">如何申请密钥：在 AstrBot 图片生成插件的提示词广场“在线”页里填写邮箱申请，验证邮件里点确认即可。</p>",
             ),
+        ),
+        (
+            "status-ok",
+            status_page(&sample_status(true)),
+        ),
+        (
+            "status-no-snapshot",
+            status_page(&sample_status(false)),
         ),
     ];
     for (name, html) in pages {

@@ -2550,6 +2550,7 @@ async fn catalog_etag_openapi_llms() {
         "/v1/templates/{id}",
         "/v1/templates/batch",
         "/v1/tags",
+        "/status",
         "/v1/status",
         "/v1/catalog",
         "/v1/catalog/version",
@@ -2583,6 +2584,10 @@ async fn catalog_etag_openapi_llms() {
     assert!(llms.contains("https://hub.test.example"));
     assert!(!llms.contains("{BASE_URL}"));
     assert!(llms.contains("keys/lookup"), "llms.txt 应包含新接口");
+    assert!(
+        llms.contains("https://hub.test.example/status"),
+        "llms.txt 应包含状态页"
+    );
 }
 
 #[tokio::test]
@@ -2621,6 +2626,172 @@ async fn rate_limit_returns_429_with_retry_after() {
         .await
         .unwrap();
     assert_eq!(keyed.status(), 200);
+}
+
+/// 浏览器状态页：HTML、安全头、no-store，模板数随库里的已公开模板变化。
+#[tokio::test]
+async fn status_page_shows_template_count() {
+    let Some(app) = app().await else { return };
+    let page = app.client.get(app.url("/status")).send().await.unwrap();
+    assert_eq!(page.status(), 200);
+    let content_type = page
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(content_type.starts_with("text/html"), "{content_type}");
+    for header in [
+        "content-security-policy",
+        "x-frame-options",
+        "referrer-policy",
+    ] {
+        assert!(page.headers().contains_key(header), "缺少 {header}");
+    }
+    assert_eq!(page.headers().get("cache-control").unwrap(), "no-store");
+    let html = page.text().await.unwrap();
+    assert!(html.contains("服务运行正常"));
+    for (href, label) in [
+        ("/", "返回首页"),
+        ("/llms.txt", "接口说明"),
+        ("/v1/status", "JSON 版本"),
+    ] {
+        assert!(
+            html.contains(&format!("href=\"{href}\">{label}</a>")),
+            "{label}"
+        );
+    }
+    assert!(html.contains("class=\"num\">0<"));
+
+    let key = app
+        .create_key_direct("status-page@qq.com", &["read", "write"])
+        .await;
+    let created = app
+        .client
+        .post(app.url("/v1/templates"))
+        .bearer_auth(&key)
+        .json(&template_json("状态页", "内容 {{input}}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let again = app.client.get(app.url("/status")).send().await.unwrap();
+    assert_eq!(again.status(), 200);
+    let html = again.text().await.unwrap();
+    assert!(html.contains("class=\"num\">1<"));
+}
+
+/// `/v1/status` 不做内容协商：浏览器 Accept HTML 时仍是原来的 JSON。
+#[tokio::test]
+async fn status_json_unchanged_when_accept_is_html() {
+    let Some(app) = app().await else { return };
+    let response = app
+        .client
+        .get(app.url("/v1/status"))
+        .header("accept", "text/html,application/xhtml+xml")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        content_type.starts_with("application/json"),
+        "{content_type}"
+    );
+    assert_eq!(
+        response.headers().get("cache-control").unwrap(),
+        "public, max-age=60"
+    );
+    let text = response.text().await.unwrap();
+    // Value 的对象键是字母序，线上顺序要看原始 JSON。
+    let mut cursor = 0;
+    for key in [
+        "\"version\"",
+        "\"template_count\"",
+        "\"catalog\"",
+        "\"rate_limits\"",
+        "\"generated_at\"",
+    ] {
+        let found = text[cursor..]
+            .find(key)
+            .unwrap_or_else(|| panic!("缺少键 {key}"));
+        cursor += found + key.len();
+    }
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut keys: Vec<&str> = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "catalog",
+            "generated_at",
+            "rate_limits",
+            "template_count",
+            "version",
+        ]
+    );
+    let mut rate_keys: Vec<&str> = body["rate_limits"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    rate_keys.sort_unstable();
+    assert_eq!(
+        rate_keys,
+        [
+            "account_create_per_hour",
+            "account_template_limit",
+            "anonymous_read_per_minute_per_ip",
+            "auth_failure_per_minute_per_ip",
+            "key_request_per_hour_per_ip",
+            "key_verify_per_hour_per_ip",
+            "keyed_read_per_minute_per_key",
+            "report_per_hour_per_ip",
+            "write_per_minute_per_key",
+        ]
+    );
+}
+
+/// `/status` 与 `/v1/status` 共用匿名读额度；用 JSON 接口耗尽后，页面返回 429 HTML。
+#[tokio::test]
+async fn status_page_shares_anonymous_read_limit() {
+    let Some(app) = app_with(|config| config.rate_limits.anon_read_per_min = 1).await else {
+        return;
+    };
+    let json = app.client.get(app.url("/v1/status")).send().await.unwrap();
+    assert_eq!(json.status(), 200);
+    let page = app.client.get(app.url("/status")).send().await.unwrap();
+    assert_eq!(page.status(), 429);
+    let content_type = page
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(content_type.starts_with("text/html"), "{content_type}");
+    let retry_after = page
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .expect("429 应带 Retry-After");
+    assert!(retry_after >= 1);
+    let html = page.text().await.unwrap();
+    assert!(html.contains("请求过于频繁"));
+    assert!(html.contains(&format!("请 {retry_after} 秒后再刷新")));
+    assert!(html.contains("<html"));
+    assert!(!html.contains("rate_limited"));
 }
 
 /// 邮件里的吊销链接：确认页、吊销、幂等与响应头。
@@ -2897,7 +3068,7 @@ async fn root_index_page() {
     for link in [
         "/llms.txt",
         "/openapi.json",
-        "/v1/status",
+        "/status",
         "/v1/catalog/version",
     ] {
         assert!(

@@ -24,6 +24,7 @@
 - GET {BASE_URL}/v1/templates/batch?ids=a,b,c：批量取详情，最多 50 个。
 - GET {BASE_URL}/v1/tags?q=&limit=：标签与模板数。
 - GET {BASE_URL}/v1/status：版本、模板数、目录哈希、限流说明。
+- GET {BASE_URL}/status：给浏览器看的服务状态页（HTML）；程序读取请用 /v1/status（JSON，不受影响）。
 - GET {BASE_URL}/v1/catalog/version：目录快照 {hash, count, updated_at, size}。
 - GET {BASE_URL}/v1/catalog：全部已公开模板的 JSON 包，按 Accept-Encoding 协商：
   声明接受 gzip 时返回 gzip（强 ETag + Content-Encoding: gzip），否则返回明文（弱 ETag W/"哈希"）。

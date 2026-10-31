@@ -159,6 +159,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/templates/{id}", get(public::get_template))
         .route("/v1/templates/{id}/report", post(public::report_template))
         .route("/v1/tags", get(public::list_tags))
+        .route("/status", get(public::status_page))
         .route("/v1/status", get(public::status))
         .route("/v1/catalog/version", get(public::catalog_version))
         .route("/v1/catalog", get(public::catalog))
@@ -264,6 +265,7 @@ mod tests {
     #[test]
     fn everything_else_is_no_store() {
         for (method, path) in [
+            (Method::GET, "/status"),
             (Method::POST, "/v1/templates"),
             (Method::POST, "/v1/templates/import"),
             (Method::POST, "/v1/templates/abcdefghijk2/report"),

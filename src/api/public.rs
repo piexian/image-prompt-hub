@@ -13,6 +13,7 @@ use crate::api::helpers::{
 };
 use crate::error::ApiError;
 use crate::models::{TemplateJson, TemplateRow};
+use crate::pages::{html_response, page, PageKind};
 use crate::search::SEARCH_OFFSET_LIMIT;
 use crate::state::AppState;
 use crate::validate::has_forbidden_control;
@@ -334,20 +335,8 @@ pub struct StatusResponse {
     pub generated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[utoipa::path(
-    get,
-    path = "/v1/status",
-    operation_id = "status",
-    tag = "meta",
-    responses(
-        (status = 200, description = "服务状态与公开限流说明", body = StatusResponse),
-    )
-)]
-pub async fn status(
-    State(state): State<AppState>,
-    ctx: RequestContext,
-) -> Result<Json<StatusResponse>, ApiError> {
-    ctx.check_read_limit(&state)?;
+/// 组装状态数据。JSON 与 HTML 共用，避免两处查询各自漂移。
+async fn build_status(state: &AppState) -> Result<StatusResponse, ApiError> {
     let template_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM templates WHERE status = 'published'")
             .fetch_one(&state.pool)
@@ -364,13 +353,80 @@ pub async fn status(
         "account_create_per_hour": config.account_create_per_hour,
         "account_template_limit": config.account_template_limit,
     });
-    Ok(Json(StatusResponse {
+    Ok(StatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         template_count,
         catalog: state.catalog.meta(),
         rate_limits,
         generated_at: chrono::Utc::now(),
-    }))
+    })
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/status",
+    operation_id = "status",
+    tag = "meta",
+    responses(
+        (status = 200, description = "服务状态与公开限流说明", body = StatusResponse),
+    )
+)]
+pub async fn status(
+    State(state): State<AppState>,
+    ctx: RequestContext,
+) -> Result<Json<StatusResponse>, ApiError> {
+    ctx.check_read_limit(&state)?;
+    Ok(Json(build_status(&state).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/status",
+    operation_id = "status_page",
+    tag = "meta",
+    responses(
+        (status = 200, description = "给浏览器看的服务状态页", content_type = "text/html"),
+        (status = 429, description = "请求过于频繁", content_type = "text/html"),
+        (status = 503, description = "暂时无法获取服务状态", content_type = "text/html"),
+    )
+)]
+pub async fn status_page(State(state): State<AppState>, ctx: RequestContext) -> Response {
+    if let Err(error) = ctx.check_read_limit(&state) {
+        return status_error_page(error);
+    }
+    match build_status(&state).await {
+        Ok(status) => html_response(crate::pages::status_page(&status), StatusCode::OK),
+        Err(error) => status_error_page(error),
+    }
+}
+
+/// 限流渲染成警告页；其他失败不把细节写进页面。
+fn status_error_page(error: ApiError) -> Response {
+    if let Some(secs) = error.retry_after {
+        let body = format!("<p>请求过于频繁，请 {secs} 秒后再刷新</p>");
+        let mut response = html_response(
+            page(PageKind::Warning, "请求过于频繁", "请求过于频繁", &body),
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+        if let Ok(value) = HeaderValue::from_str(&secs.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+        return response;
+    }
+    tracing::error!(
+        code = error.code.as_str(),
+        message = %error.message,
+        "获取服务状态失败"
+    );
+    html_response(
+        page(
+            PageKind::Error,
+            "服务状态不可用",
+            "暂时无法获取服务状态",
+            "<p>暂时无法获取服务状态，请稍后再试</p>",
+        ),
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
 }
 
 #[utoipa::path(
