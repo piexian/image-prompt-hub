@@ -2507,3 +2507,48 @@ async fn revoke_link_rate_limited() {
         200
     );
 }
+
+/// 根路径导航页：GET/HEAD、内容、安全头。
+#[tokio::test]
+async fn root_index_page() {
+    let Some(app) = app().await else { return };
+
+    let response = app.client.get(app.url("/")).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/html")));
+    for header in [
+        "content-security-policy",
+        "x-frame-options",
+        "cache-control",
+        "referrer-policy",
+    ] {
+        assert!(
+            response.headers().contains_key(header),
+            "导航页缺少 {header}"
+        );
+    }
+    assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+    let html = response.text().await.unwrap();
+    for link in [
+        "/llms.txt",
+        "/openapi.json",
+        "/v1/status",
+        "/v1/catalog/version",
+    ] {
+        assert!(
+            html.contains(&format!("href=\"{link}\"")),
+            "缺少导航链接 {link}"
+        );
+    }
+    assert!(html.contains("公开检索与下载，申请密钥后可上传"));
+    assert!(html.contains("如何申请密钥"));
+
+    // HEAD 同样可用
+    let head = app.client.head(app.url("/")).send().await.unwrap();
+    assert_eq!(head.status(), 200);
+    assert!(head.headers().contains_key("content-security-policy"));
+}

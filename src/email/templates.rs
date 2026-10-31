@@ -169,84 +169,9 @@ pub fn api_key_email(key: &str, revoke_link: &str) -> EmailContent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::html::tests::attribute_problems;
 
     const LINK: &str = "https://hub.example.com/v1/keys/verify?token=abc123";
-
-    /// 属性良构检查：对每个开标签解析属性，要求值用引号包裹且闭合引号之后
-    /// （标签内）只能是空白或自闭合斜杠。字体栈含单引号，若属性误用单引号包裹，
-    /// 值会在内部引号处被截断，这个扫描器会抓到。
-    fn attribute_problems(html: &str) -> Vec<String> {
-        let chars: Vec<char> = html.chars().collect();
-        let mut problems = Vec::new();
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i] == '<' && chars.get(i + 1).is_some_and(|c| c.is_ascii_alphabetic()) {
-                let mut j = i + 1;
-                while j < chars.len() && chars[j] != '>' {
-                    j += 1;
-                }
-                if j >= chars.len() {
-                    problems.push(format!(
-                        "标签未闭合：{}",
-                        chars[i..].iter().collect::<String>()
-                    ));
-                    break;
-                }
-                let tag: String = chars[i..=j].iter().collect();
-                let mut k = i + 1;
-                while k < j && chars[k].is_ascii_alphanumeric() {
-                    k += 1;
-                }
-                while k < j {
-                    while k < j && chars[k].is_whitespace() {
-                        k += 1;
-                    }
-                    if k >= j {
-                        break;
-                    }
-                    if chars[k] == '/' {
-                        k += 1;
-                        continue;
-                    }
-                    let name_start = k;
-                    while k < j && chars[k] != '=' && !chars[k].is_whitespace() {
-                        k += 1;
-                    }
-                    let name: String = chars[name_start..k].iter().collect();
-                    if k < j && chars[k] == '=' {
-                        k += 1;
-                        let quote = chars[k];
-                        if quote != '"' && quote != '\'' {
-                            problems.push(format!("属性 {name} 未用引号包裹：{tag}"));
-                            break;
-                        }
-                        k += 1;
-                        while k < j && chars[k] != quote {
-                            k += 1;
-                        }
-                        if k >= j {
-                            problems.push(format!("属性 {name} 的值未闭合：{tag}"));
-                            break;
-                        }
-                        k += 1;
-                        if k < j {
-                            let next = chars[k];
-                            if !next.is_whitespace() && next != '/' {
-                                problems.push(format!(
-                                    "属性 {name} 的值在内部引号处被截断（后面是 {next:?}）：{tag}"
-                                ));
-                                break;
-                            }
-                        }
-                    }
-                }
-                i = j + 1;
-            } else {
-                i += 1;
-            }
-        }
-        problems
-    }
 
     #[test]
     fn attribute_scanner_catches_broken_style() {

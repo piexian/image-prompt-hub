@@ -1,8 +1,8 @@
 //! 密钥申请、邮箱验证与自助吊销。
 
 use axum::extract::{Form, Query, State};
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::http::StatusCode;
+use axum::response::Response;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -18,6 +18,7 @@ use crate::email::{
 use crate::error::ApiError;
 use crate::html::escape_html;
 use crate::models::ApiKeyRow;
+use crate::pages::{html_response, page, PageKind};
 use crate::state::AppState;
 use crate::validate::{is_email_allowed, is_valid_email_format, normalize_email};
 
@@ -29,52 +30,6 @@ const REQUEST_ACCEPTED_MESSAGE: &str =
     "如果这个邮箱可以申请，验证邮件已发送，请在 30 分钟内打开邮件中的链接完成确认。";
 
 /// 确认页与结果页统一的安全响应头。
-fn html_response(body: String, status: StatusCode) -> Response {
-    let mut response = Html(body).into_response();
-    *response.status_mut() = status;
-    let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
-        ),
-    );
-    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    headers.insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
-}
-
-fn page_shell(title: &str, body: &str) -> String {
-    // 共用样式：居中卡片与胶囊形主按钮；CSP 只允许内联样式，不引入脚本与外部资源
-    format!(
-        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">\
-         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>{}</title>\
-         <style>\
-         body{{margin:0;padding:2rem 1rem;background:#F4F1FF;color:#2D2A4A;\
-         font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;\
-         line-height:1.6;min-height:100vh;box-sizing:border-box;display:flex;\
-         align-items:flex-start;justify-content:center}}\
-         .card{{background:#fff;max-width:32em;width:100%;padding:2rem 1.75rem;\
-         border-radius:16px;box-shadow:0 4px 24px rgba(108,92,231,.12);\
-         border-top:4px solid #6C5CE7;box-sizing:border-box;margin:2rem 0}}\
-         h1{{color:#6C5CE7;font-size:1.35rem;margin:0 0 .75rem}}\
-         p{{color:#2D2A4A;margin:.5rem 0}}\
-         button{{background:#F76707;color:#fff;border:none;border-radius:999px;\
-         padding:.65rem 1.75rem;font-size:1rem;font-weight:600;cursor:pointer;\
-         margin-top:.75rem}}\
-         button:hover{{background:#e85c06}}\
-         </style></head>\
-         <body><main class=\"card\">{}</main></body></html>",
-        escape_html(title),
-        body
-    )
-}
-
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct VerifyPageParams {
     pub token: Option<String>,
@@ -99,9 +54,11 @@ pub async fn verify_page(
     let token = params.token.unwrap_or_default();
     let record = lookup_verification(&state.pool, &token).await?;
     let page = match record {
-        None => page_shell(
+        None => page(
+            PageKind::Error,
             "链接无效",
-            "<h1>链接无效或已过期</h1><p>这个验证链接不存在、已被使用或已超过 30 分钟有效期。请重新申请密钥。</p>",
+            "链接无效或已过期",
+            "<p>这个验证链接不存在、已被使用或已超过 30 分钟有效期。请重新申请密钥。</p>",
         ),
         Some(record) => {
             let action = if record.purpose == "reset" {
@@ -109,15 +66,23 @@ pub async fn verify_page(
             } else {
                 "申请 API 密钥。确认后新密钥将发送到这个邮箱。"
             };
-            page_shell(
+            page(
+                PageKind::Confirm,
                 "确认操作",
                 &format!(
-                    "<h1>确认{}密钥</h1><p>你正在为这个邮箱{action}</p>\
+                    "确认{}密钥",
+                    if record.purpose == "reset" {
+                        "重置"
+                    } else {
+                        "申请"
+                    }
+                ),
+                &format!(
+                    "<p>你正在为这个邮箱{action}</p>\
                      <form method=\"post\" action=\"/v1/keys/verify\">\
                      <input type=\"hidden\" name=\"token\" value=\"{}\">\
                      <button type=\"submit\">确认</button></form>\
-                     <p style=\"color:#666\">不是你本人的操作？直接关闭本页即可。</p>",
-                    if record.purpose == "reset" { "重置" } else { "申请" },
+                     <p class=\"muted\">不是你本人的操作？直接关闭本页即可。</p>",
                     escape_html(&token),
                 ),
             )
@@ -171,9 +136,11 @@ async fn confirm_verification(state: AppState, token: String) -> Result<Response
 
     let Some((verification_id, email_hmac, email_ciphertext, purpose)) = claimed else {
         return Ok(html_response(
-            page_shell(
+            page(
+                PageKind::Error,
                 "链接无效",
-                "<h1>链接无效或已过期</h1><p>这个验证链接不存在、已被使用或已超过 30 分钟有效期。请重新申请密钥。</p>",
+                "链接无效或已过期",
+                "<p>这个验证链接不存在、已被使用或已超过 30 分钟有效期。请重新申请密钥。</p>",
             ),
             StatusCode::OK,
         ));
@@ -190,9 +157,11 @@ async fn confirm_verification(state: AppState, token: String) -> Result<Response
         tx.rollback().await.map_err(ApiError::from)?;
         tracing::info!(purpose = %purpose, "封禁邮箱的确认被拒绝");
         return Ok(html_response(
-            page_shell(
+            page(
+                PageKind::Warning,
                 "无法发放",
-                "<h1>无法为这个邮箱发放密钥</h1><p>如有疑问请联系管理员。</p>",
+                "无法为这个邮箱发放密钥",
+                "<p>如有疑问请联系管理员。</p>",
             ),
             StatusCode::OK,
         ));
@@ -238,9 +207,11 @@ async fn confirm_verification(state: AppState, token: String) -> Result<Response
                 tracing::error!(error = ?error, "回滚 pending 密钥失败");
             }
             return Ok(html_response(
-                page_shell(
+                page(
+                    PageKind::Error,
                     "出错了",
-                    "<h1>暂时无法完成操作</h1><p>请稍后重新申请密钥。</p>",
+                    "暂时无法完成操作",
+                    "<p>请稍后重新申请密钥。</p>",
                 ),
                 StatusCode::OK,
             ));
@@ -255,11 +226,11 @@ async fn confirm_verification(state: AppState, token: String) -> Result<Response
         }
         let retry = error.retry_after.unwrap_or(3600).div_ceil(3600).max(1);
         return Ok(html_response(
-            page_shell(
+            page(
+                PageKind::Warning,
                 "发送受限",
-                &format!(
-                    "<h1>今日发信已达上限</h1><p>大约 {retry} 小时后请重新打开邮件里的链接再点一次“确认”。</p>"
-                ),
+                "今日发信已达上限",
+                &format!("<p>大约 {retry} 小时后请重新打开邮件里的链接再点一次“确认”。</p>"),
             ),
             StatusCode::OK,
         ));
@@ -282,9 +253,11 @@ async fn confirm_verification(state: AppState, token: String) -> Result<Response
             tracing::error!(error = ?error, "回滚 pending 密钥失败");
         }
         return Ok(html_response(
-            page_shell(
+            page(
+                PageKind::Error,
                 "发送失败",
-                "<h1>邮件发送失败</h1><p>稍后请重新打开邮件里的链接再点一次“确认”。</p>",
+                "邮件发送失败",
+                "<p>稍后请重新打开邮件里的链接再点一次“确认”。</p>",
             ),
             StatusCode::OK,
         ));
@@ -319,9 +292,11 @@ async fn confirm_verification(state: AppState, token: String) -> Result<Response
     tracing::info!(purpose = %purpose, "密钥发放完成");
 
     Ok(html_response(
-        page_shell(
+        page(
+            PageKind::Success,
             "操作完成",
-            "<h1>密钥已发送到邮箱</h1><p>请到邮箱查收密钥邮件。没有收到时，检查垃圾邮件文件夹。</p>",
+            "密钥已发送到邮箱",
+            "<p>请到邮箱查收密钥邮件。没有收到时，检查垃圾邮件文件夹。</p>",
         ),
         StatusCode::OK,
     ))
@@ -366,9 +341,11 @@ pub async fn activate_key(
 
 fn unfinished_page() -> Response {
     html_response(
-        page_shell(
+        page(
+            PageKind::Error,
             "操作未完成",
-            "<h1>操作未完成</h1><p>请重新打开邮件里的验证链接，再点一次“确认”。</p>",
+            "操作未完成",
+            "<p>请重新打开邮件里的验证链接，再点一次“确认”。</p>",
         ),
         StatusCode::OK,
     )
@@ -382,9 +359,11 @@ pub struct RevokePageParams {
 /// 通用无效页：不区分令牌坏、密钥不存在还是已吊销。
 fn revoke_invalid_page() -> Response {
     html_response(
-        page_shell(
+        page(
+            PageKind::Error,
             "链接无效",
-            "<h1>链接无效</h1><p>这个链接无效，或这把密钥已经被吊销。</p>",
+            "链接无效",
+            "<p>这个链接无效，或这把密钥已经被吊销。</p>",
         ),
         StatusCode::OK,
     )
@@ -425,11 +404,12 @@ pub async fn revoke_page(
     let Some(key_prefix) = prefix else {
         return Ok(revoke_invalid_page());
     };
-    let page = page_shell(
+    let page = page(
+        PageKind::Confirm,
         "确认吊销",
+        "确认吊销密钥",
         &format!(
-            "<h1>确认吊销密钥</h1>\
-             <p>即将吊销密钥 <code>{}</code>。</p>\
+            "<p>即将吊销密钥 <span class=\"ktag\">{}</span>。</p>\
              <p>吊销后使用这把密钥的插件会立刻失效。</p>\
              <p>之后可以用同一个邮箱重新申请新密钥。</p>\
              <form method=\"post\" action=\"/v1/keys/revoke\">\
@@ -478,9 +458,11 @@ pub async fn revoke_confirm(
         // 日志只记事件本身，不含令牌与密钥内容
         tracing::info!("密钥已通过邮件链接吊销");
         Ok(html_response(
-            page_shell(
+            page(
+                PageKind::Success,
                 "已吊销",
-                "<h1>密钥已吊销</h1><p>使用这把密钥的插件会立刻失效。需要新密钥时，用同一个邮箱重新申请即可。</p>",
+                "密钥已吊销",
+                "<p>使用这把密钥的插件会立刻失效。需要新密钥时，用同一个邮箱重新申请即可。</p>",
             ),
             StatusCode::OK,
         ))

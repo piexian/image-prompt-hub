@@ -90,6 +90,8 @@ pub fn router(state: AppState) -> Router {
         post(write::import_templates).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT));
 
     Router::new()
+        // 根路径导航页（静态，不查库、不限流）
+        .route("/", get(crate::pages::index))
         // 公开只读
         .route(
             "/v1/templates",

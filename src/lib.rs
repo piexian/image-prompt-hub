@@ -10,6 +10,7 @@ pub mod email;
 pub mod error;
 pub mod html;
 pub mod models;
+pub mod pages;
 pub mod ratelimit;
 pub mod search;
 pub mod state;

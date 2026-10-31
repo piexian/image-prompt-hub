@@ -2,6 +2,7 @@
 
 > AstrBot 图片生成插件（gemini image generation）配套的在线提示词模板服务。
 > 公开接口不需要密钥；上传、修改、删除需要 API 密钥。基础地址：{BASE_URL}
+> 根路径 {BASE_URL}/ 是给浏览器用户的导航页，不是接口。
 
 ## 模板字段
 
