@@ -1414,7 +1414,13 @@ async fn catalog_eventual_consistency_and_etag_body_pair() {
         .await
         .unwrap();
     let hash = version["hash"].as_str().unwrap().to_string();
-    let catalog = app.client.get(app.url("/v1/catalog")).send().await.unwrap();
+    let catalog = app
+        .client
+        .get(app.url("/v1/catalog"))
+        .header("Accept-Encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
     let etag = catalog
         .headers()
         .get("etag")
@@ -2123,7 +2129,14 @@ async fn catalog_etag_openapi_llms() {
         .unwrap();
     let hash = version["hash"].as_str().unwrap().to_string();
 
-    let catalog = app.client.get(app.url("/v1/catalog")).send().await.unwrap();
+    // 显式声明接受 gzip 才拿到 gzip 变体（协商见 catalog_negotiation 测试）
+    let catalog = app
+        .client
+        .get(app.url("/v1/catalog"))
+        .header("Accept-Encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(catalog.status(), 200);
     assert_eq!(catalog.headers().get("content-encoding").unwrap(), "gzip");
     assert_eq!(
@@ -2137,6 +2150,7 @@ async fn catalog_etag_openapi_llms() {
         .to_str()
         .unwrap()
         .to_string();
+    assert!(!etag.starts_with("W/"), "gzip 变体保持强 ETag：{etag}");
     assert_eq!(etag, format!("\"{hash}\""));
     let raw = catalog.bytes().await.unwrap();
     let mut decoder = flate2::read::GzDecoder::new(&raw[..]);

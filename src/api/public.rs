@@ -400,8 +400,8 @@ pub async fn catalog_version(
     operation_id = "catalog",
     tag = "catalog",
     responses(
-        (status = 200, description = "全部已公开模板的 gzip JSON 包，ETag 为目录哈希"),
-        (status = 304, description = "快照未变化"),
+        (status = 200, description = "全部已公开模板的 JSON 包，按 Accept-Encoding 协商：接受 gzip 时返回 gzip（强 ETag + Content-Encoding: gzip），否则返回明文（弱 ETag W/\"哈希\"）；两种变体都带 Vary: Accept-Encoding"),
+        (status = 304, description = "If-None-Match 弱比较命中（强弱形式皆可），带 ETag 与 Vary"),
     )
 )]
 pub async fn catalog(
@@ -415,22 +415,83 @@ pub async fn catalog(
         .catalog
         .snapshot()
         .ok_or_else(|| ApiError::internal_with("目录快照尚未生成"))?;
-    let etag = format!("\"{}\"", snapshot.meta.hash);
+    // 按 Accept-Encoding 协商：gzip 变体保持强 ETag 与 Content-Encoding（缓存兼容），
+    // 明文变体用弱 ETag（同一份内容的另一种编码）
+    let use_gzip = accepts_gzip(
+        headers
+            .get(header::ACCEPT_ENCODING)
+            .and_then(|value| value.to_str().ok()),
+    );
+    let strong = format!("\"{}\"", snapshot.meta.hash);
+    let etag = if use_gzip {
+        strong.clone()
+    } else {
+        format!("W/{strong}")
+    };
     let etag_value = HeaderValue::from_str(&etag).expect("ETAG 可编码");
-    if if_none_match_hits(&headers, &etag) {
+    let vary = HeaderValue::from_static("Accept-Encoding");
+    // If-None-Match 按弱比较：强弱形式都命中同一哈希
+    if if_none_match_hits(&headers, &strong) {
         let mut response = StatusCode::NOT_MODIFIED.into_response();
-        response.headers_mut().insert(header::ETAG, etag_value);
+        let response_headers = response.headers_mut();
+        response_headers.insert(header::ETAG, etag_value);
+        response_headers.insert(header::VARY, vary);
         return Ok(response);
     }
-    let mut response = snapshot.gzipped.clone().into_response();
+    let body = if use_gzip {
+        snapshot.gzipped.clone()
+    } else {
+        snapshot.plain.clone()
+    };
+    let mut response = body.into_response();
     let response_headers = response.headers_mut();
     response_headers.insert(header::ETAG, etag_value);
-    response_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    if use_gzip {
+        response_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    }
     response_headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
+    response_headers.insert(header::VARY, vary);
     Ok(response)
+}
+
+/// Accept-Encoding 里 gzip 是否被接受。显式 `gzip`（含 q=0 或格式错误的 q）优先于
+/// 通配符 `*`；两者都没有时按不接受处理。大小写不敏感，容忍多余空格。
+fn accepts_gzip(accept_encoding: Option<&str>) -> bool {
+    let Some(header) = accept_encoding else {
+        return false;
+    };
+    let mut wildcard_ok = false;
+    let mut gzip_q: Option<bool> = None;
+    for item in header.split(',') {
+        let mut parts = item.splitn(2, ';');
+        let name = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        // 默认 q=1；q 值缺失或格式错误按 1、显式为 0 按不接受
+        let mut accepted = true;
+        if let Some(params) = parts.next() {
+            let q_param = params
+                .split(';')
+                .map(str::trim)
+                .find(|param| param.to_ascii_lowercase().starts_with("q="));
+            if let Some(param) = q_param {
+                match param[2..].trim().parse::<f32>() {
+                    Ok(value) => accepted = value > 0.0,
+                    Err(_) => accepted = false,
+                }
+            }
+        }
+        match name.as_str() {
+            "gzip" => gzip_q = Some(accepted),
+            "*" => wildcard_ok = wildcard_ok || accepted,
+            _ => {}
+        }
+    }
+    gzip_q.unwrap_or(wildcard_ok)
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -485,4 +546,41 @@ pub async fn report_template(
         .execute(&state.pool)
         .await?;
     Ok(StatusCode::ACCEPTED)
+}
+
+#[cfg(test)]
+mod negotiation_tests {
+    use super::accepts_gzip;
+
+    #[test]
+    fn accepts_gzip_negotiation_matrix() {
+        // 无头 / 空值 / 无关编码：不接受
+        assert!(!accepts_gzip(None));
+        assert!(!accepts_gzip(Some("")));
+        assert!(!accepts_gzip(Some("deflate, br")));
+        assert!(!accepts_gzip(Some("identity")));
+        // 基本接受
+        assert!(accepts_gzip(Some("gzip")));
+        assert!(accepts_gzip(Some("GZIP")));
+        assert!(accepts_gzip(Some("gzip, deflate, br")));
+        assert!(accepts_gzip(Some("*")));
+        // q 值
+        assert!(accepts_gzip(Some("gzip;q=1")));
+        assert!(accepts_gzip(Some("gzip;q=0.5")));
+        assert!(!accepts_gzip(Some("gzip;q=0")));
+        assert!(!accepts_gzip(Some("gzip;q=0.0")));
+        assert!(!accepts_gzip(Some("*;q=0")));
+        assert!(!accepts_gzip(Some("*;q=0, gzip;q=0")));
+        // 显式 gzip 优先于通配符：gzip;q=0 否决 *
+        assert!(!accepts_gzip(Some("*, gzip;q=0")));
+        assert!(accepts_gzip(Some("*;q=0, gzip")));
+        // 格式错误的 q 按不接受
+        assert!(!accepts_gzip(Some("gzip;q=abc")));
+        assert!(!accepts_gzip(Some("gzip;q=")));
+        // 空格与大小写容忍
+        assert!(accepts_gzip(Some("  gzip ; q=0.5 ")));
+        assert!(accepts_gzip(Some("Br, GZip")));
+        // 非参数的分号段
+        assert!(accepts_gzip(Some("gzip;level=9")));
+    }
 }

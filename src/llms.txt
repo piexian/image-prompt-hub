@@ -23,7 +23,9 @@
 - GET {BASE_URL}/v1/tags?q=&limit=：标签与模板数。
 - GET {BASE_URL}/v1/status：版本、模板数、目录哈希、限流说明。
 - GET {BASE_URL}/v1/catalog/version：目录快照 {hash, count, updated_at, size}。
-- GET {BASE_URL}/v1/catalog：全部已公开模板的 JSON 包（gzip 压缩），ETag 为目录哈希，
+- GET {BASE_URL}/v1/catalog：全部已公开模板的 JSON 包，按 Accept-Encoding 协商：
+  声明接受 gzip 时返回 gzip（强 ETag + Content-Encoding: gzip），否则返回明文（弱 ETag W/"哈希"）。
+  两种变体都带 Vary: Accept-Encoding，ETag 哈希相同。缓存/同步以快照 ETag 为准。
   Cache-Control: public, max-age=300。插件同步时先取 version，哈希不变就不必下载。
 - POST {BASE_URL}/v1/templates/{id}/report：举报 {"reason": "..."}，返回 202。
 - GET {BASE_URL}/openapi.json：完整 OpenAPI 3.1 文档。

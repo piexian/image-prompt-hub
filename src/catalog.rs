@@ -31,10 +31,11 @@ pub struct CatalogMeta {
     pub size: u64,
 }
 
-/// gzip 字节与元数据放在同一个 Arc 里整体替换：接口取一次快照，
-/// ETag 与正文必然来自同一次生成。
+/// 明文与 gzip 字节、元数据放在同一个 Arc 里整体替换：接口取一次快照，
+/// ETag 与正文必然来自同一次生成；两种编码的 ETag 哈希部分相同。
 pub struct CatalogSnapshot {
     pub meta: CatalogMeta,
+    pub plain: Bytes,
     pub gzipped: Bytes,
 }
 
@@ -146,6 +147,7 @@ fn build_snapshot(rows: &[TemplateRow]) -> Result<CatalogSnapshot, ApiError> {
             updated_at: package.updated_at,
             size: gzipped.len() as u64,
         },
+        plain: Bytes::from(json),
         gzipped: Bytes::from(gzipped),
     })
 }
