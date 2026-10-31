@@ -69,19 +69,77 @@ async fn not_found_fallback() -> ApiError {
     ApiError::not_found()
 }
 
+/// `X-Request-Id` 头名（http crate 未提供常量）。
+const X_REQUEST_ID: header::HeaderName = header::HeaderName::from_static("x-request-id");
+
+/// 每个请求的元信息：由最外层中间件生成，访问日志与响应头共用。
+#[derive(Clone, Debug)]
+pub struct RequestInfo {
+    pub request_id: uuid::Uuid,
+    /// 合规的 CF-Ray 值（字母数字连字符、≤40 字符），用于与 Cloudflare 日志对照。
+    pub cf_ray: Option<String>,
+}
+
+/// CF-Ray 只允许字母、数字和连字符，长度不超过 40；不含 IP，可以安全记录。
+pub fn valid_cf_ray(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 40
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// 最外层：服务端生成请求 ID，写入响应头并交给访问日志；
+/// 客户端传来的同名请求头一律丢弃（防伪造与日志注入）。
+async fn request_id_layer(mut request: Request, next: Next) -> Response {
+    let request_id = uuid::Uuid::new_v4();
+    request.headers_mut().remove(&X_REQUEST_ID);
+    let cf_ray = request
+        .headers()
+        .get("cf-ray")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| valid_cf_ray(value))
+        .map(|value| value.to_string());
+    request
+        .extensions_mut()
+        .insert(RequestInfo { request_id, cf_ray });
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        &X_REQUEST_ID,
+        HeaderValue::from_str(&request_id.to_string()).expect("UUID 编码为头值不会失败"),
+    );
+    response
+}
+
 /// 访问日志：只记方法、路径（不含查询串）、状态与耗时。
 async fn access_log(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
+    let info = request.extensions().get::<RequestInfo>().cloned();
     let start = std::time::Instant::now();
     let response = next.run(request).await;
-    tracing::info!(
-        method = %method,
-        path = %path,
-        status = response.status().as_u16(),
-        ms = start.elapsed().as_millis() as u64,
-        "access"
-    );
+    // 中间件顺序保证 request_id_layer 先执行；缺扩展时仍记基础字段
+    let request_id = info
+        .as_ref()
+        .map(|i| i.request_id.to_string())
+        .unwrap_or_default();
+    match info.as_ref().and_then(|i| i.cf_ray.as_deref()) {
+        Some(cf_ray) => tracing::info!(
+            request_id = %request_id,
+            cf_ray = %cf_ray,
+            method = %method,
+            path = %path,
+            status = response.status().as_u16(),
+            ms = start.elapsed().as_millis() as u64,
+            "access"
+        ),
+        None => tracing::info!(
+            request_id = %request_id,
+            method = %method,
+            path = %path,
+            status = response.status().as_u16(),
+            ms = start.elapsed().as_millis() as u64,
+            "access"
+        ),
+    }
     response
 }
 
@@ -144,6 +202,7 @@ pub fn router(state: AppState) -> Router {
             std::time::Duration::from_secs(10),
         ))
         .layer(middleware::from_fn(access_log))
+        .layer(middleware::from_fn(request_id_layer))
         .layer(SetResponseHeaderLayer::overriding(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
@@ -155,6 +214,21 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cf_ray_validation() {
+        // 合法：字母数字与连字符、不超过 40
+        assert!(valid_cf_ray("8f1e2d3e4f5a6b7c"));
+        assert!(valid_cf_ray("ABC-abc-123"));
+        assert!(valid_cf_ray(&"a".repeat(40)));
+        // 不合法：超长、空、其他字符
+        assert!(!valid_cf_ray(&"a".repeat(41)));
+        assert!(!valid_cf_ray(""));
+        assert!(!valid_cf_ray("with space"));
+        assert!(!valid_cf_ray("under_score"));
+        assert!(!valid_cf_ray("ray;injection"));
+        assert!(!valid_cf_ray("射线"));
+    }
 
     fn policy(method: Method, path: &str, status: u16, auth: bool) -> &'static str {
         cache_policy(&method, path, StatusCode::from_u16(status).unwrap(), auth)

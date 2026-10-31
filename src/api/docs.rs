@@ -15,7 +15,7 @@ use crate::state::AppState;
     info(
         title = "image-prompt-hub",
         version = env!("CARGO_PKG_VERSION"),
-        description = "AstrBot 图片生成插件的在线提示词模板服务：公开只读检索与下载，申请密钥后可写。"
+        description = "AstrBot 图片生成插件的在线提示词模板服务：公开只读检索与下载，申请密钥后可写。所有响应都带 X-Request-Id 响应头（服务端生成的 UUIDv4），报问题时请附上它。"
     ),
     paths(
         public::list_templates,
